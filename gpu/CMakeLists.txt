@@ -4,8 +4,8 @@ cmake_minimum_required(VERSION 3.24)
 project(bbgpu LANGUAGES C CXX)
 # Newer libc++ (clang 21+) no longer includes these transitively; the shadPS4, sirit and FFX
 # sources rely on them (std::abort, _countof, swprintf_s, log2, placement new, ...).
-if(WIN32)
-    foreach(header cstdlib cstring cstdio cstdint cmath cwchar new limits utility algorithm)
+if(WIN32 OR APPLE)
+    foreach(header cstdlib cstring cstdio cstdint cmath cwchar new limits utility algorithm exception)
         add_compile_options("$<$<COMPILE_LANGUAGE:CXX>:SHELL:-include ${header}>")
     endforeach()
 endif()
@@ -70,7 +70,7 @@ endif()
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(XXHASH REQUIRED IMPORTED_TARGET libxxhash)
 pkg_check_modules(SDL3 REQUIRED IMPORTED_TARGET sdl3)
-if (NOT WIN32)
+if (NOT WIN32 AND NOT APPLE)
     pkg_check_modules(X11 REQUIRED IMPORTED_TARGET x11)
 endif()
 find_package(miniz QUIET)
@@ -216,6 +216,17 @@ if (WIN32)
         $<$<COMPILE_LANGUAGE:CXX>:-include ${CMAKE_CURRENT_SOURCE_DIR}/shim/bb_win_compat.h>)
     target_link_libraries(bbnet PUBLIC ws2_32 iphlpapi bcrypt crypt32)
 endif()
+if (APPLE)
+    # kqueue-backed <sys/epoll.h> (the PS4 net library), as in shadPS4's macOS build.
+    find_package(epoll-shim CONFIG REQUIRED)
+    target_link_libraries(bbnet PUBLIC epoll-shim::epoll-shim)
+    target_compile_options(bbnet PRIVATE
+        $<$<COMPILE_LANGUAGE:CXX>:-include ${CMAKE_CURRENT_SOURCE_DIR}/shim/bb_mac_compat.h>)
+    # Zydis's exported target links the bare name "Zycore" (no imported target): give the linker its directory.
+    find_library(ZYCORE_LIBRARY Zycore REQUIRED)
+    get_filename_component(ZYCORE_LIBRARY_DIR "${ZYCORE_LIBRARY}" DIRECTORY)
+    target_link_directories(bbgpu PRIVATE "${ZYCORE_LIBRARY_DIR}")
+endif()
 target_link_libraries(bbgpu PUBLIC bbnet)
 # In-game settings menu: Dear ImGui (third_party/imgui, MIT) with its Vulkan backend, and an
 # embedded Cyrillic font (third_party/fonts).
@@ -231,7 +242,10 @@ target_include_directories(bbgpu PRIVATE shim shadps4 ${SHADER_INCLUDE} third_pa
 target_compile_definitions(bbgpu PRIVATE BOOST_ASIO_STANDALONE NDEBUG)
 target_compile_options(bbgpu PRIVATE -Wno-deprecated-declarations -Wno-missing-field-initializers)
 # Runtime symbols (runtime_memory_*, runtime_process_*) resolve against bb-probe.
-if (NOT WIN32)
+if (APPLE)
+    # Mach-O: the runtime_* symbols stay undefined in the dylib and bind to bb-probe at load time.
+    target_link_options(bbgpu PRIVATE -undefined dynamic_lookup)
+elseif (NOT WIN32)
     target_link_options(bbgpu PRIVATE -Wl,--allow-shlib-undefined)
 endif()
 target_link_libraries(bbgpu PRIVATE ffx-vulkan::portable ffx-vulkan::fsr4-v07-vulkan
@@ -248,7 +262,11 @@ if (WIN32)
 else()
     # the xbyak submodule, as on Windows (no system package needed).
     target_include_directories(bbgpu PRIVATE third_party/xbyak)
-    target_link_libraries(bbgpu PUBLIC PkgConfig::X11)
+    if (NOT APPLE)
+        target_link_libraries(bbgpu PUBLIC PkgConfig::X11)
+    else()
+        target_compile_options(bbgpu PRIVATE -include ${CMAKE_CURRENT_SOURCE_DIR}/shim/bb_mac_compat.h)
+    endif()
 endif()
 
 # bbport (Windows): bbgpu is a static library there, so the loader and the HLE runtime are

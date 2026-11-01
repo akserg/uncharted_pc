@@ -32,6 +32,29 @@ MINGW*|MSYS*)
     exit 0
     ;;
 esac
+# macOS (Apple Silicon): the host is an x86_64 binary that runs under Rosetta 2 (docs/macos/README.md).
+# Libraries come only from $BB_DEPS (scripts/macos/build-deps.sh) and the LunarG Vulkan SDK; the
+# environment is set here because shell calls do not keep it. Build tools (cmake, ninja, pkg-config,
+# nasm) may be arm64 Homebrew ones; nothing from /opt/homebrew is ever linked.
+darwin=()      # extra cmake arguments
+arch_flags=()  # added to every compile and link line
+if [[ $(uname -s) == Darwin ]]; then
+    export VULKAN_SDK=${VULKAN_SDK:-$HOME/VulkanSDK/1.4.363.0/macOS}
+    export BB_DEPS=${BB_DEPS:-$HOME/.local/uncharted-x86_64}
+    # LIBDIR, not PATH: no fallback to /opt/homebrew/lib/pkgconfig. The SDK provides vulkan.pc.
+    export PKG_CONFIG_LIBDIR=$BB_DEPS/lib/pkgconfig:$VULKAN_SDK/lib/pkgconfig
+    export CMAKE_PREFIX_PATH=$BB_DEPS
+    export MACOSX_DEPLOYMENT_TARGET=15.4
+    export PATH=$VULKAN_SDK/bin:$PATH   # glslang
+    [[ -f $BB_DEPS/lib/pkgconfig/sdl3.pc ]] || { echo "Dependencies missing: run scripts/macos/build-deps.sh" >&2; exit 1; }
+    CC=${CC:-clang}
+    arch_flags=(-arch x86_64 -mmacosx-version-min=15.4)
+    # PGO profiles are GCC-format; LTO starts off. Old CMake projects (sirit, FSR) need the policy floor.
+    BB_PGO=${BB_PGO:-off}; BB_LTO=${BB_LTO:-OFF}
+    darwin=(-DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ -DCMAKE_OSX_ARCHITECTURES=x86_64
+        -DCMAKE_OSX_DEPLOYMENT_TARGET=15.4 -DCMAKE_PREFIX_PATH="$BB_DEPS" -DCMAKE_POLICY_VERSION_MINIMUM=3.5
+        -DCMAKE_IGNORE_PREFIX_PATH='/opt/homebrew;/usr/local' -DCMAKE_FIND_FRAMEWORK=LAST)
+fi
 if [[ -z ${CC:-} ]]; then
     CC=$(command -v cc || command -v gcc || true)
     if [[ -z $CC ]]; then
@@ -75,7 +98,8 @@ for patch in gpu/patches/fsr-vulkan/*.patch; do
     fi
 done
 cmake -S gpu -B out/gpu -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo -DBB_PGO="$pgo" \
-    -DBB_LTO="${BB_LTO:-ON}" -DBB_PGO_DIR="$PWD/pgo" -DVulkan_INCLUDE_DIR="$vulkan_headers" >/dev/null
+    -DBB_LTO="${BB_LTO:-ON}" -DBB_PGO_DIR="$PWD/pgo" -DVulkan_INCLUDE_DIR="$vulkan_headers" \
+    ${darwin[@]+"${darwin[@]}"} >/dev/null
 echo "GPU library: PGO $pgo, LTO ${BB_LTO:-ON}"
 # A failed GPU build must stop here: an older libbbgpu.so would otherwise be used silently.
 if ! ninja ${BB_JOBS:+-j"$BB_JOBS"} -C out/gpu bbgpu > out/gpu-build.log 2>&1; then
@@ -84,29 +108,42 @@ if ! ninja ${BB_JOBS:+-j"$BB_JOBS"} -C out/gpu bbgpu > out/gpu-build.log 2>&1; t
 fi
 # $ORIGIN/gpu: packaged copies keep the library next to the binary without patching it.
 gpu=(-Lout/gpu -lbbgpu -Wl,-rpath,'$ORIGIN/gpu' -Wl,-rpath,"$PWD/out/gpu" -rdynamic)
+# Mach-O: @loader_path/gpu; the executable exports its symbols to libbbgpu (runtime_*); non-PIE with a
+# 4 KiB __PAGEZERO so the guest image can sit at 0x400000 and the low 2 GiB are usable (M2).
+# Zydis is not described by pkg-config.
+zydis=(-lZydis)
+pie=(-no-pie)
+cc=("$CC")
+if [[ $(uname -s) == Darwin ]]; then
+    gpu=(-Lout/gpu -lbbgpu -Wl,-rpath,@loader_path/gpu -Wl,-rpath,"$PWD/out/gpu" -Wl,-rpath,"$VULKAN_SDK/lib" -Wl,-export_dynamic)
+    zydis=(-L"$BB_DEPS/lib" -lZydis)
+    pie=(-Wl,-no_pie -Wl,-pagezero_size,0x1000)
+    cc=("$CC" "${arch_flags[@]}")
+    includes=(-I"$BB_DEPS/include" "${includes[@]}")
+fi
 runtime=(src/runtime*.c)
 # Third-party decoders: compiled once, without this project's -Werror policy.
 atrac9=(third_party/LibAtrac9/C/src/*.c)
 if [[ ! -f out/libatrac9.a || -n $(find third_party/LibAtrac9/C/src -newer out/libatrac9.a -name '*.c') ]]; then
     rm -rf out/atrac9 && mkdir -p out/atrac9
-    for source in "${atrac9[@]}"; do "$CC" -std=c99 -O2 -g -w -c "$source" -o "out/atrac9/$(basename "${source%.c}").o"; done
+    for source in "${atrac9[@]}"; do "${cc[@]}" -std=c99 -O2 -g -w -c "$source" -o "out/atrac9/$(basename "${source%.c}").o"; done
     ar rcs out/libatrac9.a out/atrac9/*.o
 fi
-"$CC" -std=c11 -O2 -g -Wall -Wextra -Werror -pthread -no-pie "${includes[@]}" -I. -Isrc src/probe.c src/cpu_patch.c "${runtime[@]}" src/vulkan_smoke.c out/libatrac9.a -lm -lZydis "${gpu[@]}" "${libraries[@]}" -o out/bb-probe
+"${cc[@]}" -std=c11 -O2 -g -Wall -Wextra -Werror -pthread "${pie[@]}" "${includes[@]}" -I. -Isrc src/probe.c src/cpu_patch.c "${runtime[@]}" src/vulkan_smoke.c out/libatrac9.a -lm "${zydis[@]}" "${gpu[@]}" "${libraries[@]}" -o out/bb-probe
 echo "Built $PWD/out/bb-probe"
 # GPU check for run.sh (live_resolution=auto): links only the Vulkan loader.
-"$CC" -std=c11 -O2 -Wall -Wextra -Werror tools/gpu_capabilities.c "${libraries[@]}" -o out/bb-gpu-capabilities
+"${cc[@]}" -std=c11 -O2 -Wall -Wextra -Werror "${includes[@]}" tools/gpu_capabilities.c "${libraries[@]}" -o out/bb-gpu-capabilities
 if [[ ${1:-} == --test ]]; then
-    "$CC" -std=c11 -O2 -g -Wall -Wextra -Werror -pthread "${includes[@]}" -I. -Isrc tests/test_pad.c "${libraries[@]}" -o out/pad-test
+    "${cc[@]}" -std=c11 -O2 -g -Wall -Wextra -Werror -pthread "${includes[@]}" -I. -Isrc tests/test_pad.c "${libraries[@]}" -o out/pad-test
     out/pad-test
-    "$CC" -std=c11 -O2 -g -Wall -Wextra -Werror -pthread -I. -Isrc tests/test_runtime.c "${runtime[@]}" out/libatrac9.a -lm "${gpu[@]}" "${libraries[@]}" -o out/runtime-test
+    "${cc[@]}" -std=c11 -O2 -g -Wall -Wextra -Werror -pthread "${includes[@]}" -I. -Isrc tests/test_runtime.c "${runtime[@]}" out/libatrac9.a -lm "${gpu[@]}" "${libraries[@]}" -o out/runtime-test
     out/runtime-test
-    "$CC" -std=c11 -O2 -g -Wall -Wextra -Werror -pthread -Isrc tests/test_file_mods.c -o out/file-mods-test
+    "${cc[@]}" -std=c11 -O2 -g -Wall -Wextra -Werror -pthread "${includes[@]}" -Isrc tests/test_file_mods.c -o out/file-mods-test
     out/file-mods-test
-    "$CC" -std=c11 -O2 -g -Wall -Wextra -Werror -pthread -I. -Isrc tests/test_sema.c "${runtime[@]}" out/libatrac9.a -lm "${gpu[@]}" "${libraries[@]}" -o out/sema-test
+    "${cc[@]}" -std=c11 -O2 -g -Wall -Wextra -Werror -pthread "${includes[@]}" -I. -Isrc tests/test_sema.c "${runtime[@]}" out/libatrac9.a -lm "${gpu[@]}" "${libraries[@]}" -o out/sema-test
     out/sema-test
-    "$CC" -std=c11 -D_GNU_SOURCE -O2 -g -Wall -Wextra -Werror -I. -Isrc tests/test_content.c src/runtime_content.c -o out/content-test
+    "${cc[@]}" -std=c11 -D_GNU_SOURCE -O2 -g -Wall -Wextra -Werror "${includes[@]}" -I. -Isrc tests/test_content.c src/runtime_content.c -o out/content-test
     out/content-test
-    "$CC" -std=c11 -O2 -g -Wall -Wextra -Werror -pthread -Isrc tests/test_cpu_patch.c src/cpu_patch.c -lZydis -o out/cpu-patch-test
+    "${cc[@]}" -std=c11 -O2 -g -Wall -Wextra -Werror -pthread "${includes[@]}" -Isrc tests/test_cpu_patch.c src/cpu_patch.c "${zydis[@]}" -o out/cpu-patch-test
     out/cpu-patch-test
 fi
