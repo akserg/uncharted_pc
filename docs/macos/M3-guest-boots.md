@@ -166,3 +166,20 @@ Not exercised by the game (they only run once GNM runs / guest code reaches the 
 ### Needs a decision from the owner
 - Provide a game dump path (`BB_GAME_DIR`) to finish Task 9, or accept M3 as "runtime verified, guest unverified" and carry Task 9 into M4.
 - Keep the TSD-displacement TLS (spec) or move to shadPS4's LDT/FS approach if the real ELFs contain other `gs:` forms.
+
+### Review (Opus 5.5, 2026-11-01)
+
+Accepted as **runtime verified, guest unverified**. Task 9 (boot to first GNM/VideoOut) moves to M4's
+preconditions; it needs the game dump, which is not yet available.
+
+Decisions:
+1. **TLS: keep the TSD design** (`gs:[key*8]`, `patch_tcb_loads`, `pthread_setspecific`). The shipping
+   Windows build uses exactly this mechanism (only the `mov rax, gs:[0]` form is redirected) and runs all
+   three games, because upstream's `link_*.py` normalises guest TCB loads to that form (comment above
+   `patch_tcb_loads` in probe.c). shadPS4's LDT/FS approach stays a fallback only if a real ELF shows an
+   unpatched `gs:` access (would fault at a low address under Rosetta).
+2. **Pool backend: mach memory entry, accepted** (10 GB written in 120 s with the file backend).
+   Discard-by-memset keeps pages resident; revisit with `madvise(MADV_FREE_REUSABLE)` only if M5 shows
+   memory growth.
+3. **Linux/Windows regressions**: Linux build + tests to be re-run by the reviewer from the pushed branch.
+4. Watchdog Mach enumeration not async-signal-safe: acceptable (diagnostic path, process is already dying).

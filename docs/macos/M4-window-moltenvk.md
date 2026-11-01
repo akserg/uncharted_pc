@@ -4,6 +4,8 @@
 U1 main menu renders in an SDL3 Cocoa window through MoltenVK.
 
 ## Preconditions
+- Game dump available (`BB_GAME_DIR`). **First do M3 task 9** (boot to first GNM/VideoOut call) and record it
+  in M3's Result under "Task 9 (done in M4)", including the patched gs-load count per ELF.
 - M3 done. LunarG Vulkan SDK (universal) installed; `$VULKAN_SDK/lib/libMoltenVK.dylib` lists x86_64.
 - `VK_ICD_FILENAMES=$VULKAN_SDK/share/vulkan/icd.d/MoltenVK_icd.json` (or the loader finds it).
   `vulkaninfo` (x86_64) lists the Apple GPU.
