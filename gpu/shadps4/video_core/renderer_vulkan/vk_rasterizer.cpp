@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include "bb_user_range.h"
 #include <array>
 #include <atomic>
 #include <chrono>
@@ -1159,8 +1160,13 @@ StaleTracker& Stale() {
         StaleTracker t;
         if (const char* env = std::getenv("BB_STALE_CHECK")) {
             if (env[0] == '1' && env[1] == 0) {
+#ifdef __APPLE__
+                t.low = BB_USER_MIN + 0x100000000ull; // the user range starts at BB_USER_MIN here
+                t.high = t.low + 0x1000000ull;
+#else
                 t.low = 0x1100000000ull;
                 t.high = 0x1101000000ull;
+#endif
             } else {
                 char* end;
                 t.low = std::strtoull(env, &end, 16);

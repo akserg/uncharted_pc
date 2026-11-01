@@ -24,6 +24,7 @@
 #include <vector>
 #include <SDL3/SDL.h>
 #include "../bbgpu.h"
+#include "bb_user_range.h"
 #include "common/elf_info.h"
 #include "common/logging/log.h"
 #include "common/rdtsc.h"
@@ -151,7 +152,7 @@ void AddressSpace::Protect(VAddr virtual_addr, u64 size, MemoryPermission perms)
 }
 boost::icl::interval_set<VAddr> AddressSpace::GetUsableRegions() {
     boost::icl::interval_set<VAddr> set;
-    set += boost::icl::interval<VAddr>::right_open(0x10'0000'0000ULL, 0xfc'0000'0000ULL);
+    set += boost::icl::interval<VAddr>::right_open(BB_USER_MIN, BB_USER_MAX);
     return set;
 }
 } // namespace Core

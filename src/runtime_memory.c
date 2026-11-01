@@ -8,6 +8,7 @@
  * encode 40-bit addresses, so host-default 0x7f... addresses would not fit. */
 #define _GNU_SOURCE
 #include "runtime.h"
+#include "gpu/shim/bb_user_range.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -43,17 +44,9 @@ static uint64_t pool_size_bytes(void) {
 #define POOL_SIZE pool_size_bytes()
 #define FLEXIBLE_SIZE (UINT64_C(448) * 1024 * 1024)
 #define PAGE UINT64_C(16384)
-#ifdef __APPLE__
-/* Rosetta x86_64 process: [0x1000000000, 0x7000000000) is reserved by the system (GPU carveout; every
- * mmap there fails with EACCES, measured in M2) and [0xFC0000000, 0x1000000000) is the commpage.
- * shadPS4 makes the same cut for macOS x86_64 (USER_MIN 0x7000000000). */
-#define USER_MIN UINT64_C(0x7000000000)
-#define LOW_MAX UINT64_C(0xfc0000000)
-#else
-#define USER_MIN UINT64_C(0x1000000000)
-#define LOW_MAX USER_MIN
-#endif
-#define USER_MAX UINT64_C(0xfc00000000)
+#define USER_MIN ((uint64_t)BB_USER_MIN)
+#define LOW_MAX ((uint64_t)BB_LOW_MAX)
+#define USER_MAX ((uint64_t)BB_USER_MAX)
 #define LIMIT 4096
 #define INVALID ((int32_t)UINT32_C(0x80020016))
 #define NO_MEMORY ((int32_t)UINT32_C(0x8002000c))
@@ -537,6 +530,15 @@ static int32_t place(void **inout, uint64_t size, int prot, int flags, uint64_t 
     if (flags & MAP_FIXED_FLAG) {
         if (!address || address%PAGE) return INVALID;
         if ((flags & MAP_NO_OVERWRITE) && overlaps(address,address+size,1)) return NO_MEMORY;
+#ifdef __APPLE__
+        /* The kernel forbids [0x1000000000, 0x7000000000) under Rosetta (M2): a guest that fixes a mapping
+         * outside the user range is refused, and the log says which address it wanted. */
+        if (!in_user_range(address,size)) {
+            fprintf(stderr,"MACOS: refused fixed map addr=%#" PRIxPTR " size=%#" PRIx64 " (outside [%#" PRIx64 ", %#" PRIx64 "))\n",
+                    address,size,(uint64_t)USER_MIN,(uint64_t)USER_MAX);
+            return NO_MEMORY;
+        }
+#endif
     } else {
         address=find_free(address,size,alignment);
         if (!address) return NO_MEMORY;

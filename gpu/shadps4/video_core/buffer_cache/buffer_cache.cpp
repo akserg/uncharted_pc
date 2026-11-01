@@ -28,6 +28,7 @@
 #include "video_core/texture_cache/texture_cache.h"
 
 #include <vk_mem_alloc.h>
+#include "bb_user_range.h"
 #include <cstdio>
 #ifdef _WIN32
 #include <windows.h>
@@ -681,7 +682,14 @@ namespace {
 /// bbport: the guest frame (g_guest_frames) in which the GPU last bound each 4 KiB page of the
 /// GPU heap window, read or written (BufferCache::ObtainBuffer). GPU data still in use, such as
 /// buffers a compute shader made once and every frame draws from, is never taken for dead.
+#ifdef __APPLE__
+// macOS: the guest user range starts at BB_USER_MIN (bb_user_range.h), not 0x1000000000.
+constexpr VAddr GpuUseLow = BB_USER_MIN, GpuUseHigh = BB_USER_MIN + 0x200000000ull;
+#else
 constexpr VAddr GpuUseLow = 0x1000000000ull, GpuUseHigh = 0x1200000000ull;
+#endif
+/// The engine's hot frame-data window (0x104xxxxxxx on Linux), 256 MiB region number.
+constexpr u64 HotRegion = (GpuUseLow + 0x40000000ull) >> 28;
 std::unique_ptr<u32[]> gpu_use_frame{new u32[(GpuUseHigh - GpuUseLow) >> 12]{}};
 
 void NoteGpuUse(VAddr address, u64 size) {
@@ -1063,10 +1071,10 @@ struct BufferStats {
     std::chrono::steady_clock::time_point window = std::chrono::steady_clock::now();
     u64 calls = 0;
 };
-/// 256 MiB regions; 1 MiB inside the hot 0x104xxxxxxx window (the engine's frame data).
+/// 256 MiB regions; 1 MiB inside the hot window (0x104xxxxxxx on Linux) (the engine's frame data).
 BufferStats& Stats();
 void NoteHotUse(VAddr address, u32 size) {
-    if ((address >> 28) != 0x104) {
+    if ((address >> 28) != HotRegion) {
         return;
     }
     auto& st = Stats();
@@ -1081,7 +1089,7 @@ void NoteHotUse(VAddr address, u32 size) {
     }
 }
 u64 RegionKey(VAddr address) {
-    return (address >> 28) == 0x104 ? (address >> 20) | (1ull << 40) : address >> 28;
+    return (address >> 28) == HotRegion ? (address >> 20) | (1ull << 40) : address >> 28;
 }
 bool BufferStatsEnabled() {
     static const bool enabled = [] {
