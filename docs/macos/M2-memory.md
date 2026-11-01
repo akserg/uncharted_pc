@@ -40,7 +40,8 @@ in a Rosetta x86-64 process:
    - `mprotect` a page RWX succeeds, or document that it does not
    - discard then re-touch a region works
 3. Make `bash build.sh --test` run `tests/test_runtime.c` and the new test on macOS; both pass.
-4. Remove the M1 stubs for memory.
+4. `MAP_FIXED_NOREPLACE` (`runtime_low_map`, `runtime_image_map`, `cpu_patch.c` thunk allocation): Darwin has no equivalent flag. Use `mmap` with the address as a hint (no `MAP_FIXED`), accept only if result == requested address, else `munmap` and continue the probe loop.
+5. Remove the M1 stubs for memory.
 
 ## Acceptance
 - `arch -x86_64 bash build.sh --test` passes `runtime-test` and `memory-darwin-test`.

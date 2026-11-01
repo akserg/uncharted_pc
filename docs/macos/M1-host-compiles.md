@@ -10,6 +10,7 @@ backend stubbed so the binary starts and fails with a clear "no cocoa yet" messa
 - Every brew/build command in this project runs under `arch -x86_64`. Verify with `arch` printing `i386`.
 
 ## Tasks
+0. `git apply docs/macos/M0-linux-build-fixes.patch` (libav link in build.sh, two -Werror fixes, test_pad.c). Commit as `macos: apply M0 build fixes`.
 1. **Dependencies** (`arch -x86_64 /usr/local/bin/brew install ...`): `cmake ninja pkg-config sdl3
    molten-vk vulkan-loader vulkan-headers glslang fmt boost xxhash robin-map vulkan-memory-allocator
    zydis xbyak magic_enum miniz ffmpeg spirv-headers spirv-cross`. Record any formula that is missing or
@@ -31,6 +32,8 @@ backend stubbed so the binary starts and fails with a clear "no cocoa yet" messa
    - DLSS/XeSS/FSR4 sources and `ffx-vulkan::fsr4-v07-vulkan`: exclude on APPLE (grep `dlss`, `xess`,
      `fsr4`, `DXIL` in `gpu/`). Keep FSR 3.1 (`ffx-vulkan::portable`) compiling.
    - `bbgpu` as `SHARED` on APPLE (dylib), matching the Linux shape.
+   - `-Wl,--allow-shlib-undefined` (line ~235) → `-undefined dynamic_lookup` on APPLE.
+   - `page_manager.cpp` includes `<linux/userfaultfd.h>`: guard with `#ifdef __linux__` and compile only the mprotect/signal fallback on APPLE (full verification in M4).
 4. **`gpu/shim/window.cpp`**: add a `cocoa` branch that sets `window_info.type = WindowSystemType::Metal`
    and `render_surface` from `SDL_PROP_WINDOW_COCOA_METAL_VIEW_TAG` / `SDL_Metal_CreateView` +
    `SDL_Metal_GetLayer`. For M1 it is acceptable to just `LOG_ERROR` and abort there — the point is that
@@ -42,6 +45,8 @@ backend stubbed so the binary starts and fails with a clear "no cocoa yet" messa
      `host_discard()` (real fix in M2).
    - `pthread_setaffinity_np`, `pthread_setname_np` signature, `clock_gettime` flags, `sched_*`,
      `O_DIRECT`, `posix_fadvise`, `sysinfo`: replace with Darwin equivalents or no-ops; list each in Result.
+   - `arch_prctl(ARCH_SET_GS)` in `runtime_thread.c` `set_gs` and `SYS_tgkill` in `probe.c`: stub with `MACOS-STUB(M3)`.
+   - `MAP_FIXED_NOREPLACE` in `runtime_memory.c` and `cpu_patch.c`: stub/define with `MACOS-STUB(M2)`.
    - `-Werror` will bite on unused-variable from the stubs; keep `-Werror`, fix properly.
 6. Run `out/bb-probe` with no args: must print its usage/error and exit, not crash in the dynamic linker.
    `otool -L out/bb-probe` and `file out/bb-probe` show `x86_64` and `@loader_path/gpu/libbbgpu.dylib`.
