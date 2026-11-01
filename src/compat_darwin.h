@@ -22,11 +22,6 @@
 /* No coarse clock; the second-resolution PS4 clock only needs seconds. */
 #define CLOCK_REALTIME_COARSE CLOCK_REALTIME
 
-/* MACOS-STUB(M2): macOS has no MAP_FIXED_NOREPLACE. The flag is 0, so mmap treats the address as a
- * hint (never replacing a mapping) and every call site checks that the result equals the request
- * (bb_darwin_hint_missed). M2 verifies this under Rosetta and replaces it if the hint is not honoured. */
-#define MAP_FIXED_NOREPLACE 0
-
 static inline void bb_darwin_poll_pause(void) {
     struct timespec pause = {0, 50000}; /* 50 us */
     nanosleep(&pause, NULL);
@@ -95,11 +90,15 @@ static inline int bb_pthread_barrier_wait(bb_pthread_barrier_t *b) {
 #define pthread_barrier_init bb_pthread_barrier_init
 #define pthread_barrier_destroy bb_pthread_barrier_destroy
 #define pthread_barrier_wait bb_pthread_barrier_wait
-/* True (after unmapping) when mmap placed a hinted mapping somewhere else than requested. */
-static inline int bb_darwin_hint_missed(void *got, void *wanted, size_t size) {
-    if (got == MAP_FAILED || got == wanted) return 0;
+/* macOS has no MAP_FIXED_NOREPLACE. mmap without MAP_FIXED takes the address as a hint and honours
+ * it when the range is free (tested under Rosetta: 0x400000 and the low ranges). Returns the mapping
+ * only if it landed exactly at `wanted`; otherwise it is unmapped again and MAP_FAILED is returned,
+ * so nothing that exists is ever replaced. */
+static inline void *bb_darwin_map_at(void *wanted, size_t size, int prot) {
+    void *got = mmap(wanted, size, prot, MAP_PRIVATE | MAP_ANON, -1, 0);
+    if (got == MAP_FAILED || got == wanted) return got;
     munmap(got, size);
-    return 1;
+    return MAP_FAILED;
 }
 #define pthread_mutex_timedlock bb_pthread_mutex_timedlock
 #define pthread_rwlock_timedrdlock bb_pthread_rwlock_timedrdlock

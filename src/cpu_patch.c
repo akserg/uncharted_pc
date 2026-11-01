@@ -81,6 +81,9 @@ static unsigned char *near_image(size_t size) {
 #ifdef _WIN32
         void *p=VirtualAlloc((void *)(uintptr_t)at,size,MEM_RESERVE|MEM_COMMIT,PAGE_EXECUTE_READWRITE);
         if (p) return p;
+#elif defined(__APPLE__)
+        void *p=bb_darwin_map_at((void *)(uintptr_t)at,size,PROT_READ|PROT_WRITE|PROT_EXEC); /* hint, verified */
+        if (p!=MAP_FAILED) return p;
 #else
         void *p=mmap((void *)(uintptr_t)at,size,PROT_READ|PROT_WRITE|PROT_EXEC,MAP_PRIVATE|MAP_ANONYMOUS|MAP_FIXED_NOREPLACE,-1,0);
         if (p==(void *)(uintptr_t)at) return p;

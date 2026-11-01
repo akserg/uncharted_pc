@@ -859,9 +859,10 @@ void *runtime_low_map(size_t size, int prot) {
 #else
     void *p=MAP_FAILED;
     while (low_next+size<=LOW_MAX) {
-        p=mmap((void *)low_next,size,prot,MAP_PRIVATE|MAP_ANONYMOUS|MAP_FIXED_NOREPLACE,-1,0);
 #ifdef __APPLE__
-        if (bb_darwin_hint_missed(p,(void *)low_next,size)) p=MAP_FAILED; /* no NOREPLACE: hint only */
+        p=bb_darwin_map_at((void *)low_next,size,prot); /* no MAP_FIXED_NOREPLACE: hint, verified */
+#else
+        p=mmap((void *)low_next,size,prot,MAP_PRIVATE|MAP_ANONYMOUS|MAP_FIXED_NOREPLACE,-1,0);
 #endif
         low_next+=size+PAGE; /* unmapped gap catches overruns */
         if (p!=MAP_FAILED) break;
@@ -882,11 +883,11 @@ void *runtime_image_map(size_t size, int prot) {
     for (uintptr_t at=IMAGE_MIN; !p && at+size<=IMAGE_LIMIT; at+=UINT64_C(0x100000)) {
 #ifdef _WIN32
         p=VirtualAlloc((void *)at,size,MEM_RESERVE|MEM_COMMIT,win_prot(prot));
+#elif defined(__APPLE__)
+        p=bb_darwin_map_at((void *)at,size,prot); /* no MAP_FIXED_NOREPLACE: hint, verified */
+        if (p==MAP_FAILED) p=NULL;
 #else
         p=mmap((void *)at,size,prot,MAP_PRIVATE|MAP_ANONYMOUS|MAP_FIXED_NOREPLACE,-1,0);
-#ifdef __APPLE__
-        if (bb_darwin_hint_missed(p,(void *)at,size)) p=MAP_FAILED; /* no NOREPLACE: hint only */
-#endif
         if (p==MAP_FAILED) p=NULL;
 #endif
     }
