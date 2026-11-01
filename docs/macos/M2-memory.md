@@ -30,6 +30,12 @@ in a Rosetta x86-64 process:
   Confirm with a test; if it fails, the image must be mapped RW, written, then `mprotect` RX.
 
 ## Tasks
+0. Run `bash build.sh --test` (not run in M1). Record per-test pass/fail; fix Darwin-specific failures.
+   All runs from here on need `ROSETTA_ADVERTISE_AVX=1` in the environment (see M1 Review).
+0b. **AVX execution test**: `tests/test_avx_rosetta.c` (x86_64, built only on APPLE) executes AVX/AVX2
+   instructions via inline asm (`vaddps ymm`, `vfmadd231ps`, `vpbroadcastd`, `vpermd`) and checks results;
+   also BMI1/LZCNT/MOVBE/POPCNT. Run with and without `ROSETTA_ADVERTISE_AVX=1` and record both.
+   If AVX does not execute correctly, STOP the milestone and report — the whole strategy depends on it.
 1. Implement the Darwin `pool()`, `host_map()`, `host_unmap()`, `host_protect()`, `host_discard()`,
    `host_commit()`, `runtime_memory_reserve()` in `runtime_memory.c` under `#ifdef __APPLE__`
    (new branch between the `_WIN32` and Linux ones).

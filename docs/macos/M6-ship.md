@@ -7,14 +7,14 @@ A zip that a macOS 15.4+ user can unpack and run.
 - M5 done.
 
 ## Tasks
-1. `run.sh`: make it work unchanged on Darwin (BSD `sed`/`readlink` differences, `arch -x86_64`
+1. `run.sh`: export `ROSETTA_ADVERTISE_AVX=1` on Darwin (Rosetta reads it at launch). Make it work on Darwin (BSD `sed`/`readlink` differences, `arch -x86_64`
    not needed for a native x86_64 binary — Rosetta picks it up automatically).
 2. Packaging: `packaging/macos/package.sh` producing `dist/uncharted-macos/` with `bb-probe`,
    `gpu/libbbgpu.dylib`, bundled `libMoltenVK.dylib`, `libSDL3.dylib`, `libvulkan.dylib` and the other
    `$BB_DEPS` dylibs (`otool -L` walk, `install_name_tool` to `@loader_path`), `licenses/`, `run.sh`.
    No DLSS/XeSS/FSR4 binaries.
 3. `.app` bundle (optional for first release): `Info.plist`, `LSMinimumSystemVersion 15.4`,
-   `LSArchitecturePriority x86_64`; entitlements `com.apple.security.cs.allow-jit`,
+   `LSArchitecturePriority x86_64`, `LSEnvironment` → `ROSETTA_ADVERTISE_AVX=1` (verify it takes effect; else a tiny launcher that re-execs `bb-probe` with it); entitlements `com.apple.security.cs.allow-jit`,
    `com.apple.security.cs.allow-unsigned-executable-memory`, `com.apple.security.cs.disable-library-validation`;
    `codesign --force --deep --sign - --entitlements ...`. Ad-hoc signing is enough for a GitHub release;
    note the Gatekeeper right-click-Open step in the README.

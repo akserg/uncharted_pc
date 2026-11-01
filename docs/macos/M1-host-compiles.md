@@ -176,3 +176,26 @@ Time: the successful script run was about 2.5 minutes of wall time for the build
 ### Decisions needed
 - FSR 4 (`ffx-vulkan::fsr4-v07-vulkan`) is **still compiled and linked** on Apple. The spec says to exclude it, but it is portable Vulkan code (no DLL/DXIL) used from `vk_fsr4.cpp`, `vk_temporal_upscaler.cpp`, `bbport_settings.cpp`, `bbport_overlay.cpp`, `vk_instance.h`; excluding it would need non-additive edits in about 10 files. Proposal: leave it compiled and disable it at run time (settings / capability check) in M4/M5.
 - Asm-label approach for the three asm symbols (above) versus editing the asm to add `_`: the first keeps the "do not touch the asm" rule; please confirm.
+
+### Review (Opus 5.5, 2026-11-01)
+
+Accepted. Decisions on the two open questions:
+1. **FSR 4**: keep it compiled; disable it at run time on Apple (M4 task). Agreed.
+2. **Asm labels** (`__asm__("name")` on the C declarations for `enter_on_stack`, `fiber_swap`,
+   `fiber_start`): agreed — additive and leaves the asm byte-identical to upstream.
+
+Notes for later milestones (written into their specs):
+- `ROSETTA_ADVERTISE_AVX=1` is read by Rosetta at process launch, so it cannot be set from inside
+  `bb-probe`. Dev runs export it; `run.sh` (M6) exports it; the `.app` sets it via `LSEnvironment` in
+  Info.plist or a launcher that re-execs. M2 must prove AVX instructions *execute*, not just that
+  cpuid reports them.
+- `bash build.sh --test` was not run in M1 — first task of M2.
+- Non-additive edits that also change Linux/Windows behaviour, to watch on upstream rebases:
+  `pm4_cmds.h` `Address()` (`reinterpret_cast` → C-style cast; equivalent for pointer `T`, fixes
+  `u64`≠`uintptr_t` on Darwin) and `buffer_cache.cpp` explicit `std::min/max<VAddr>` (same reason).
+  Both are harmless on other platforms; consider upstreaming them.
+- `runtime_sema.c`: Apple uses `CLOCK_REALTIME` for condvar deadlines (as Windows). A wall-clock jump
+  can stretch/shorten guest waits. Acceptable for now; if waits misbehave in M5, switch Darwin to
+  `pthread_cond_timedwait_relative_np`.
+- Per-thread CPU stats (`pthread_getcpuclockid`, `RUSAGE_THREAD`) are compiled out on Apple — the
+  GPU-thread share in M5's perf table needs `thread_info(THREAD_BASIC_INFO)` instead, or is omitted.

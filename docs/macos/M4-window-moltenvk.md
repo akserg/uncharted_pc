@@ -23,7 +23,7 @@ U1 main menu renders in an SDL3 Cocoa window through MoltenVK.
    64-wide compute special case has a wave32 path. Record which gates are false on the Apple GPU.
 4. **Host shaders**: `glslang --target-env vulkan1.3` output must be accepted by MoltenVK. Any that use
    unsupported features will fail at pipeline creation — list them.
-5. **Upscalers**: ensure DLSS/XeSS/FSR4 are compiled out (M1) and that config defaults on macOS select
+5. **Upscalers**: DLSS/XeSS are `_WIN32`-only; FSR 4 is still compiled on Apple (M1 decision) — force it off at run time on `__APPLE__` (settings default + refuse selection with a log line) and that config defaults on macOS select
    TAA or "off". FSR 3.1 compiles but is not required to work in M4.
 6. **Run** to the main menu. Capture `user/last_run.log` and MoltenVK's own log
    (`MVK_CONFIG_LOG_LEVEL=2`) for the first frame.
