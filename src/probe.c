@@ -185,6 +185,9 @@ static ABI void guest_exit(void) { puts("Runtime: process finalizer callback rea
  * Exit code 24 with a message instead; BB_SKIP_CPU_CHECK=1 starts anyway. BMI1, LZCNT and MOVBE
  * are rewritten before the game starts (cpu_patch.c) unless BB_CPU_PATCH=0. */
 static void check_cpu(void) {
+#ifndef __APPLE__
+    if (getenv("BB_SKIP_CPU_CHECK")) return;
+#endif
     unsigned a=0, b=0, c=0, d=0, basic=0, leaf7=0, extended=0;
     if (__get_cpuid(1,&a,&b,&c,&d)) basic=c;
     if (__get_cpuid_max(0,NULL)>=7) { __cpuid_count(7,0,a,b,c,d); leaf7=b; }    if (__get_cpuid(0x80000001,&a,&b,&c,&d)) extended=c;
@@ -199,8 +202,8 @@ static void check_cpu(void) {
                (extended>>5)&1,(basic>>22)&1,(basic>>23)&1,(basic>>20)&1,(basic>>27)&1,xcr0,
                getenv("ROSETTA_ADVERTISE_AVX") ? getenv("ROSETTA_ADVERTISE_AVX") : "(unset)");
     }
-#endif
     if (getenv("BB_SKIP_CPU_CHECK")) return;
+#endif
     int avx=0;
     if (((basic>>27)&1) && ((basic>>28)&1)) { /* OSXSAVE and AVX: the OS also has to save YMM state */
         unsigned low, high;
