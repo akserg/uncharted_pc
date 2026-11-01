@@ -84,7 +84,7 @@ static void read_lock(void) { if (!exclusive_depth) pthread_rwlock_rdlock(&lock)
 static void read_unlock(void) { if (!exclusive_depth) pthread_rwlock_unlock(&lock); }
 static Block blocks[LIMIT];
 static Vma *vmas; static size_t vma_count, vma_capacity;
-#ifndef _WIN32
+#if !defined(_WIN32) && !defined(__APPLE__)
 static int pool_fd=-1;
 #endif
 static unsigned char *backing_base; /* second view of the pool: host writes bypass guest/GPU page protection */
@@ -317,13 +317,17 @@ static int pool(void) {
 }
 #elif defined(__APPLE__)
 /* ---- host mappings (macOS, x86_64 under Rosetta 2) ----
- * Backing: an unlinked sparse file in $TMPDIR (APFS) instead of memfd; every guest mapping is a
- * MAP_SHARED|MAP_FIXED view of it at the physical offset, so aliasing works as on Linux, and
- * discard is fcntl(F_PUNCHHOLE) (pages mapped elsewhere read zero afterwards, tested in M2).
+ * Backing: one anonymous mach memory entry (mach_make_memory_entry_64, MAP_MEM_NAMED_CREATE) instead of
+ * memfd. Every guest mapping is a mach_vm_map(copy=FALSE) view of it at the physical offset, so aliasing
+ * works as on Linux. An unlinked file under MAP_SHARED (the M2 backend) was measured in M3 to be flushed
+ * to the SSD in ~2 GB bursts every ~30 s while the guest rewrote 2 GiB: dirty file-backed pages are written
+ * back by the kernel, anonymous memory only goes to swap under pressure. Discard zeroes through the host
+ * view (there is no hole punching on a memory entry).
  * The PS4 user range [USER_MIN,USER_MAX) is reserved up front as one PROT_NONE anonymous mapping
- * (runtime_memory_reserve); every later MAP_FIXED lands inside that reservation and so replaces only
+ * (runtime_memory_reserve); every later fixed mapping lands inside that reservation and so replaces only
  * our own pages, never a Rosetta/dyld/system mapping. Unmapping puts PROT_NONE anonymous memory back
  * (the range stays ours). Addresses outside the reservation are refused. */
+static mach_port_t pool_entry=MACH_PORT_NULL;
 static int in_user_range(uintptr_t address, uint64_t size) {
     return address>=USER_MIN && address<=USER_MAX && size<=USER_MAX-address;
 }
@@ -354,41 +358,38 @@ void runtime_memory_reserve(void) {
 static int reserve_again(uintptr_t address, uint64_t size) {
     return mmap((void *)address,size,PROT_NONE,MAP_PRIVATE|MAP_ANONYMOUS|MAP_NORESERVE|MAP_FIXED,-1,0)==MAP_FAILED ? -1 : 0;
 }
-/* Direct memory occupies [0,POOL_SIZE) of the file, flexible memory [POOL_SIZE,+FLEX_SPAN). */
+/* Direct memory occupies [0,POOL_SIZE) of the entry, flexible memory [POOL_SIZE,+FLEX_SPAN). */
 static int pool(void) {
-    if (pool_fd>=0) return 0;
+    if (pool_entry!=MACH_PORT_NULL) return 0;
     runtime_memory_reserve();
-    const char *dir=getenv("TMPDIR");
-    char path[PATH_MAX];
-    snprintf(path,sizeof(path),"%s/bb-guest-memory.XXXXXX",dir && *dir ? dir : "/tmp");
-    int fd=mkstemp(path);
-    if (fd<0) { perror("Runtime: cannot create the guest memory file"); return -1; }
-    unlink(path);
-    fcntl(fd,F_SETFD,FD_CLOEXEC);
     const uint64_t bytes=POOL_SIZE+FLEX_SPAN;
-    if (ftruncate(fd,(off_t)bytes)) { perror("Runtime: cannot size the guest memory file"); close(fd); return -1; }
-    /* Host-only view: anywhere the kernel puts it (the hint keeps it above the guest ranges). */
-    void *view=mmap((void *)(USER_MAX+UINT64_C(0x10000000000)),bytes,PROT_READ|PROT_WRITE,MAP_SHARED|MAP_NORESERVE,fd,0);
-    if (view==MAP_FAILED) { perror("Runtime: cannot map the guest memory file"); close(fd); return -1; }
-    pool_fd=fd; backing_base=view;
+    memory_object_size_t entry_size=bytes;
+    mach_port_t entry=MACH_PORT_NULL;
+    kern_return_t kr=mach_make_memory_entry_64(mach_task_self(),&entry_size,0,MAP_MEM_NAMED_CREATE|VM_PROT_ALL,&entry,MACH_PORT_NULL);
+    if (kr!=KERN_SUCCESS || entry_size<bytes) { fprintf(stderr,"Runtime: cannot create the guest memory entry (%s)\n",mach_error_string(kr)); return -1; }
+    /* Host-only view, anywhere above the guest ranges (the address is a search start). */
+    mach_vm_address_t view=USER_MAX+UINT64_C(0x10000000000);
+    kr=mach_vm_map(mach_task_self(),&view,bytes,0,VM_FLAGS_ANYWHERE,entry,0,FALSE,VM_PROT_READ|VM_PROT_WRITE,VM_PROT_READ|VM_PROT_WRITE,VM_INHERIT_NONE);
+    if (kr!=KERN_SUCCESS) { fprintf(stderr,"Runtime: cannot map the guest memory entry (%s)\n",mach_error_string(kr)); mach_port_deallocate(mach_task_self(),entry); return -1; }
+    pool_entry=entry; backing_base=(unsigned char *)(uintptr_t)view;
     return 0;
 }
 static int host_commit(uint64_t phys, uint64_t size) { (void)phys; (void)size; return 0; }
 static int host_map(uintptr_t address, uint64_t size, int prot, int reserved, uint64_t phys) {
     if (!in_user_range(address,size)) return -1;
     if (reserved) return reserve_again(address,size);
-    /* mmap of a shared file with PROT_EXEC fails with EPERM; mprotect adds it afterwards (tested). */
-    if (mmap((void *)address,size,prot & ~PROT_EXEC,MAP_SHARED|MAP_FIXED,pool_fd,(off_t)phys)==MAP_FAILED) return -1;
+    /* Fixed + overwrite replaces the PROT_NONE reservation. The mapping starts without PROT_EXEC and mprotect
+     * adds it, as for the file backend (an executable mapping straight from the entry is not relied on). */
+    mach_vm_address_t at=address;
+    if (mach_vm_map(mach_task_self(),&at,size,0,VM_FLAGS_FIXED|VM_FLAGS_OVERWRITE,pool_entry,phys,FALSE,
+                    prot & ~PROT_EXEC,VM_PROT_ALL,VM_INHERIT_NONE)!=KERN_SUCCESS) return -1;
     if ((prot & PROT_EXEC) && mprotect((void *)address,size,prot)) { reserve_again(address,size); return -1; }
     return 0;
 }
 static int host_unmap(uintptr_t address, uint64_t size) { return in_user_range(address,size) ? reserve_again(address,size) : -1; }
 static int host_protect(uintptr_t address, uint64_t size, int prot) { return mprotect((void *)address,size,prot); }
-/* Punched holes read as zero, also through other mappings of the same pages. APFS only; elsewhere write zeros. */
-static void host_discard(uint64_t phys, uint64_t size) {
-    struct fpunchhole hole={0,0,(off_t)phys,(off_t)size};
-    if (fcntl(pool_fd,F_PUNCHHOLE,&hole)) memset(backing_base+phys,0,size);
-}
+/* Zeros are written through the host view, so every other mapping of the pages reads them too. */
+static void host_discard(uint64_t phys, uint64_t size) { memset(backing_base+phys,0,size); }
 #else
 /* Direct memory occupies [0,POOL_SIZE) of the memfd, flexible memory [POOL_SIZE,+FLEX_SPAN). */
 static int pool(void) {
