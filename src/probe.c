@@ -395,8 +395,11 @@ static LONG CALLBACK vectored_fault(EXCEPTION_POINTERS *info) {
     return EXCEPTION_CONTINUE_SEARCH;
 }
 static LONG WINAPI unhandled_fault(EXCEPTION_POINTERS *info) { return fatal_exception(info); }
+#endif
+#if defined(_WIN32) || defined(__APPLE__)
 /* Guest code reads its TCB with `mov rax, gs:[0]` (link_*.py rewrote fs:[0]); on Windows
- * the displacement becomes the TEB TLS slot that holds the guest TCB (runtime_thread.c). */
+ * the displacement becomes the TEB TLS slot that holds the guest TCB, on macOS the pthread TSD
+ * slot (key*8, GS is the TSD base there); runtime_thread.c. */
 uint32_t runtime_thread_tcb_offset(void);
 static uint64_t patch_tcb_loads(const Segment *segments, uint64_t count) {
     static const unsigned char load[]={0x65,0x48,0x8b,0x04,0x25,0,0,0,0};
@@ -416,14 +419,19 @@ static void fault(int sig, siginfo_t *info, void *context) {
     /* Instructions this CPU lacks (cpu_patch.c): a rewritten breakpoint (rip after the int3) or
      * one the scan missed continue in a thunk. */
     if (sig == SIGTRAP || sig == SIGILL) {
-        /* MACOS-STUB(M3): on Darwin RIP comes from the __ss thread state; not yet exercised under Rosetta
-         * (cpu_patch breakpoints are only reachable once a guest runs). */
+        /* Darwin: RIP is uc_mcontext->__ss.__rip (UC_RIP), tests/test_signals_darwin.c runs this under Rosetta. */
         __typeof__(&UC_RIP((ucontext_t *)context)) rip = &UC_RIP((ucontext_t *)context);
         uint64_t to = (uint64_t)*rip;
         if (sig == SIGTRAP ? cpu_patch_breakpoint(&to, to - 1) : cpu_patch_illegal(&to)) { *rip = (__typeof__(*rip))to; return; }
     }
     /* GPU page tracking (write-protected guest pages) is resolved first. */
+#ifdef __APPLE__
+    /* A write to a write-protected page is a protection failure, which Darwin raises as SIGBUS (SIGSEGV is for
+     * unmapped addresses; tests/test_signals_darwin.c). */
+    if (gpu_enabled && (sig == SIGSEGV || sig == SIGBUS) && bbgpu_handle_fault(context, info->si_addr)) return;
+#else
     if (gpu_enabled && sig == SIGSEGV && bbgpu_handle_fault(context, info->si_addr)) return;
+#endif
     /* A speculative guest memory read (runtime_memory.c) failed: resume its recovery point. */
     if ((sig == SIGSEGV || sig == SIGBUS) && runtime_fault_recover) {
         sigjmp_buf *recover = runtime_fault_recover;
@@ -502,8 +510,19 @@ static void watchdog(int sig, siginfo_t *info, void *context) {
     { ssize_t written_=write(2,head,sizeof(head)-1); (void)written_; }
     dump_frames(context);
 #ifdef __APPLE__
-    /* MACOS-STUB(M3): no /proc/self/task and no tgkill: only the thread that received SIGALRM is dumped.
-     * M3 keeps a table of guest pthread_t values and signals each with pthread_kill(SIGUSR2). */
+    /* No /proc/self/task and no tgkill: every other Mach thread gets SIGUSR2 through pthread_kill.
+     * task_threads/pthread_from_mach_thread_np are not async-signal-safe, which is acceptable for a
+     * handler that ends in _exit; threads without a pthread (kernel-only) are skipped. */
+    {
+        thread_act_array_t list=NULL;
+        mach_msg_type_number_t count=0;
+        pthread_t self=pthread_self();
+        if (task_threads(mach_task_self(),&list,&count)==KERN_SUCCESS)
+            for (mach_msg_type_number_t i=0;i<count;++i) {
+                pthread_t other=pthread_from_mach_thread_np(list[i]);
+                if (other && !pthread_equal(other,self)) { pthread_kill(other,SIGUSR2); usleep(20000); }
+            }
+    }
 #else
     int dir=open("/proc/self/task",O_RDONLY|O_DIRECTORY);
     char buffer[4096];
@@ -1191,11 +1210,8 @@ int main(int argc, char **argv) {
     /* Keep host heap objects handed to the guest (thread handles, TLS) in the
        non-PIE brk heap, i.e. below 1 TiB: the guest packs pointers into 40 bits. */
 #ifdef __APPLE__
-    /* MACOS-STUB(M3): no mallopt on macOS (libmalloc zones), and host heap objects do NOT stay below
-     * 1 TiB: under Rosetta malloc returns 0x6000xxxxxxxx (nano zone) and 0x7f..xxxxxxxx (measured in
-     * M2, docs/macos/M2-memory.md). Thread handles, TLS/TCB blocks and sync-object handles given to the
-     * guest need a low allocator (a malloc zone or an arena carved from runtime_low_map) before the
-     * guest runs. */
+    /* No mallopt/brk heap on macOS and Rosetta's malloc returns 0x6000xxxxxxxx / 0x7f..xxxxxxxx (M2). Host
+     * objects the guest holds pointers to come from runtime_lowalloc.c (bb_guest_* in runtime.h). */
 #else
     mallopt(M_ARENA_MAX,1);
     mallopt(M_MMAP_THRESHOLD,32*1024*1024);
@@ -1464,6 +1480,12 @@ int main(int argc, char **argv) {
         for (uint64_t s=0;s<ns;++s) loaded[s]=(RedZoneSegment){segments[s].address,segments[s].size,segments[s].flags};
         red_zone_patch(image, size, loaded, ns);
         free(loaded);
+    }
+#elif defined(__APPLE__)
+    {
+        const uint64_t patched=patch_tcb_loads(segments, ns);
+        printf("Guest TCB loads redirected to the pthread TSD slot gs:[%u]: %" PRIu64 "\n", runtime_thread_tcb_offset(), patched);
+        if (!patched) fputs("WARNING: no `mov rax, gs:[0]` found to redirect; guest TLS would fault\n", stderr);
     }
 #endif
     {

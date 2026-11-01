@@ -87,15 +87,28 @@ static void set_gs(void *base) {
 }
 #define tls_block_alloc(size) _aligned_malloc(size,64)
 #elif defined(__APPLE__)
-static __thread void *darwin_guest_tcb; /* host-side record only; no GS base exists on macOS */
-static void set_gs(void *base) {
-    /* MACOS-STUB(M3): macOS has no arch_prctl(ARCH_SET_GS). M3 follows the Windows path: patch_tcb_loads
-     * (probe.c) rewrites the guest's gs:[0] loads to a pthread-TSD displacement (key*8) and this stores
-     * the TCB with pthread_setspecific. Until then the TCB is only remembered per thread: host-side
-     * runtime code and the unit tests work, but guest code that reads gs:[0] would fault. */
-    darwin_guest_tcb=base;
+/* macOS has no arch_prctl(ARCH_SET_GS) and GS is already the pthread TSD base: a thread's
+ * pthread_setspecific(key) value lives at gs:[key*8] (libpthread's _os_tsd_get_direct; also what
+ * shadPS4 relies on, src/core/tls.cpp APPLE branch). Same design as Windows: probe.c patch_tcb_loads
+ * turns the guest's `mov rax, gs:[0]` into `mov rax, gs:[key*8]` and set_gs stores the TCB in
+ * the thread's slot. Rosetta emulates GS the same way (tests/test_tls_darwin.c). */
+static pthread_key_t tcb_key;
+static pthread_once_t tcb_key_once=PTHREAD_ONCE_INIT;
+static void tcb_key_create(void) {
+    int e=pthread_key_create(&tcb_key,NULL);
+    if (e) { fprintf(stderr,"STOP: pthread_key_create for the guest TCB failed (%d)\n",e); exit(21); }
+    if ((uint64_t)tcb_key*8>0x7fffffff) { fprintf(stderr,"STOP: TSD key %lu does not fit a 32-bit displacement\n",(unsigned long)tcb_key); exit(21); }
 }
-#define tls_block_alloc(size) aligned_alloc(64,size)
+uint32_t runtime_thread_tcb_offset(void) {
+    pthread_once(&tcb_key_once,tcb_key_create);
+    return (uint32_t)tcb_key*8;
+}
+static void set_gs(void *base) {
+    runtime_thread_tcb_offset();
+    int e=pthread_setspecific(tcb_key,base);
+    if (e) { fprintf(stderr,"STOP: pthread_setspecific for the guest TCB failed (%d)\n",e); exit(21); }
+}
+#define tls_block_alloc(size) bb_guest_aligned_alloc(64,size)
 #else
 static void set_gs(void *base) {
     if (syscall(SYS_arch_prctl,ARCH_SET_GS,(unsigned long)base)) { perror("STOP: arch_prctl(ARCH_SET_GS)"); exit(21); }
@@ -120,7 +133,7 @@ static void attach(GuestThread *t) {
     current=t;
 }
 static GuestThread *new_thread(void) {
-    GuestThread *t=calloc(1,sizeof(*t));
+    GuestThread *t=bb_guest_calloc(1,sizeof(*t));
     if (!t) return NULL;
     t->attr=(ThreadAttr){.magic=ATTR_MAGIC,.policy=1,.prio=DEFAULT_PRIO,.stack=DEFAULT_STACK,.affinity=0x7f};
     return t;
@@ -178,7 +191,7 @@ int32_t *runtime_errno(void) { return &guest_errno; }
 
 static ABI int32_t attr_init(ThreadAttr **out) {
     if (!out) return ERR(22);
-    ThreadAttr *a=calloc(1,sizeof(*a));
+    ThreadAttr *a=bb_guest_calloc(1,sizeof(*a));
     if (!a) return ERR(12);
     *a=(ThreadAttr){.magic=ATTR_MAGIC,.policy=1,.prio=DEFAULT_PRIO,.inherit=4,.stack=DEFAULT_STACK,.guard=4096,.affinity=0x7f};
     pthread_mutex_lock(&lock); a->next=attributes; attributes=a; pthread_mutex_unlock(&lock);
@@ -192,7 +205,7 @@ static ABI int32_t attr_destroy(ThreadAttr **slot) {
     while (*link!=a) link=&(*link)->next;
     *link=a->next; a->magic=0;
     pthread_mutex_unlock(&lock);
-    free(a); *slot=NULL; return 0;
+    bb_guest_free(a); *slot=NULL; return 0;
 }
 static ABI int32_t attr_get(void *thread,ThreadAttr **out) {
     ThreadAttr *a=find_attr(out);

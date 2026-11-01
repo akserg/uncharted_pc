@@ -155,5 +155,12 @@ if [[ ${1:-} == --test ]]; then
         out/avx-rosetta-test
         "${cc[@]}" -std=c11 -O2 -g -Wall -Wextra -Werror -pthread "${testpie[@]}" "${includes[@]}" -I. -Isrc tests/test_memory_darwin.c "${runtime[@]}" out/libatrac9.a -lm "${gpu[@]}" "${libraries[@]}" -o out/memory-darwin-test
         out/memory-darwin-test
+        "${cc[@]}" -std=c11 -O2 -g -Wall -Wextra -Werror -pthread "${testpie[@]}" "${includes[@]}" -I. -Isrc tests/test_lowalloc_darwin.c "${runtime[@]}" out/libatrac9.a -lm "${gpu[@]}" "${libraries[@]}" -o out/lowalloc-darwin-test
+        out/lowalloc-darwin-test
+        "${cc[@]}" -std=c11 -O2 -g -Wall -Wextra -Werror -pthread "${testpie[@]}" "${includes[@]}" -I. -Isrc tests/test_tls_darwin.c "${runtime[@]}" out/libatrac9.a -lm "${gpu[@]}" "${libraries[@]}" -o out/tls-darwin-test
+        out/tls-darwin-test
+        # test_signals_darwin.c includes src/probe.c (fault() and watchdog() as shipped): linked like bb-probe.
+        "${cc[@]}" -std=c11 -O2 -g -Wall -Wextra -Werror -pthread "${testpie[@]}" "${includes[@]}" -I. -Isrc tests/test_signals_darwin.c src/cpu_patch.c "${runtime[@]}" src/vulkan_smoke.c out/libatrac9.a -lm "${zydis[@]}" "${gpu[@]}" "${libraries[@]}" -o out/signals-darwin-test
+        out/signals-darwin-test
     fi
 fi
