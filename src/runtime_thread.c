@@ -87,13 +87,13 @@ static void set_gs(void *base) {
 }
 #define tls_block_alloc(size) _aligned_malloc(size,64)
 #elif defined(__APPLE__)
+static __thread void *darwin_guest_tcb; /* host-side record only; no GS base exists on macOS */
 static void set_gs(void *base) {
     /* MACOS-STUB(M3): macOS has no arch_prctl(ARCH_SET_GS). M3 follows the Windows path: patch_tcb_loads
      * (probe.c) rewrites the guest's gs:[0] loads to a pthread-TSD displacement (key*8) and this stores
-     * the TCB with pthread_setspecific. Until then no guest thread can be attached. */
-    (void)base;
-    fputs("STOP: guest TLS (GS base) is not implemented on macOS yet (M3)\n",stderr);
-    exit(21);
+     * the TCB with pthread_setspecific. Until then the TCB is only remembered per thread: host-side
+     * runtime code and the unit tests work, but guest code that reads gs:[0] would fault. */
+    darwin_guest_tcb=base;
 }
 #define tls_block_alloc(size) aligned_alloc(64,size)
 #else

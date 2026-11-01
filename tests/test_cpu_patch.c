@@ -2,6 +2,11 @@
  * (BB_CPU_PATCH=all), from the same registers, flags and memory; the results must match in every
  * register, the defined flags and memory. x86-64 Linux and Windows. */
 #define _GNU_SOURCE
+#ifdef __APPLE__
+/* <ucontext.h> needs _XOPEN_SOURCE on macOS; _DARWIN_C_SOURCE keeps the rest of libSystem visible. */
+#define _XOPEN_SOURCE 600
+#define _DARWIN_C_SOURCE
+#endif
 #include "cpu_patch.h"
 #include <assert.h>
 #include <stdint.h>
@@ -18,8 +23,14 @@
 #endif
 
 /* Instruction bytes from the assembler: name[] .. name_end[]. */
+#ifdef __APPLE__
+/* Mach-O: C symbols carry a leading underscore, labels must be global to be referenced from C. */
+#define SNIP(name,text) __asm__(".pushsection __DATA,__data\n.globl _" #name "\n_" #name ":\n" text "\n.globl _" #name "_end\n_" #name "_end:\n.popsection"); \
+    extern const unsigned char name[], name##_end[];
+#else
 #define SNIP(name,text) __asm__(".pushsection .data\n" #name ":\n" text "\n" #name "_end:\n.popsection"); \
     extern const unsigned char name[], name##_end[];
+#endif
 SNIP(none,"")
 SNIP(jmp0,"jmp 1f\n1:")
 SNIP(nop1,"nop")
@@ -212,11 +223,21 @@ static LONG CALLBACK trap(EXCEPTION_POINTERS *info) {
 static void trap(int sig, siginfo_t *info, void *context) {
     (void)sig; (void)info;
     ucontext_t *uc=context;
-    uint64_t rip=(uint64_t)uc->uc_mcontext.gregs[REG_RIP];
+#ifdef __APPLE__
+    uint64_t *rip_slot=(uint64_t *)&uc->uc_mcontext->__ss.__rip;
+#else
+    greg_t *rip_slot=&uc->uc_mcontext.gregs[REG_RIP];
+#endif
+    uint64_t rip=(uint64_t)*rip_slot;
     if (!cpu_patch_breakpoint(&rip,rip-1)) { static const char m[]="unexpected breakpoint\n"; (void)!write(2,m,sizeof(m)-1); _exit(1); }
-    uc->uc_mcontext.gregs[REG_RIP]=(greg_t)rip;
+    *rip_slot=(__typeof__(*rip_slot))rip;
     ++traps;
 }
+#endif
+
+#if defined(__APPLE__) && !defined(MAP_FIXED_NOREPLACE)
+/* macOS: the address is a hint (honoured when free); the assert below checks it was. */
+#define MAP_FIXED_NOREPLACE 0
 #endif
 
 int main(void) {

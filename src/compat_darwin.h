@@ -62,6 +62,39 @@ static inline int bb_pthread_rwlock_timedwrlock(pthread_rwlock_t *lock, const st
         bb_darwin_poll_pause();
     }
 }
+/* libSystem has no pthread_barrier_*: a mutex + condvar barrier (used by tests/test_runtime.c). */
+typedef struct { pthread_mutex_t mutex; pthread_cond_t cond; unsigned count, waiting, generation; } bb_pthread_barrier_t;
+#define pthread_barrier_t bb_pthread_barrier_t
+#define PTHREAD_BARRIER_SERIAL_THREAD (-1)
+static inline int bb_pthread_barrier_init(bb_pthread_barrier_t *b, const void *attr, unsigned count) {
+    (void)attr;
+    if (!count) return EINVAL;
+    b->count = count; b->waiting = 0; b->generation = 0;
+    pthread_mutex_init(&b->mutex, NULL);
+    pthread_cond_init(&b->cond, NULL);
+    return 0;
+}
+static inline int bb_pthread_barrier_destroy(bb_pthread_barrier_t *b) {
+    pthread_cond_destroy(&b->cond);
+    pthread_mutex_destroy(&b->mutex);
+    return 0;
+}
+static inline int bb_pthread_barrier_wait(bb_pthread_barrier_t *b) {
+    pthread_mutex_lock(&b->mutex);
+    const unsigned generation = b->generation;
+    if (++b->waiting == b->count) {
+        b->waiting = 0; ++b->generation;
+        pthread_cond_broadcast(&b->cond);
+        pthread_mutex_unlock(&b->mutex);
+        return PTHREAD_BARRIER_SERIAL_THREAD;
+    }
+    while (generation == b->generation) pthread_cond_wait(&b->cond, &b->mutex);
+    pthread_mutex_unlock(&b->mutex);
+    return 0;
+}
+#define pthread_barrier_init bb_pthread_barrier_init
+#define pthread_barrier_destroy bb_pthread_barrier_destroy
+#define pthread_barrier_wait bb_pthread_barrier_wait
 /* True (after unmapping) when mmap placed a hinted mapping somewhere else than requested. */
 static inline int bb_darwin_hint_missed(void *got, void *wanted, size_t size) {
     if (got == MAP_FAILED || got == wanted) return 0;

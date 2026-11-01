@@ -114,12 +114,15 @@ gpu=(-Lout/gpu -lbbgpu -Wl,-rpath,'$ORIGIN/gpu' -Wl,-rpath,"$PWD/out/gpu" -rdyna
 zydis=(-lZydis)
 pie=(-no-pie)
 cc=("$CC")
+testpie=()
 if [[ $(uname -s) == Darwin ]]; then
-    gpu=(-Lout/gpu -lbbgpu -Wl,-rpath,@loader_path/gpu -Wl,-rpath,"$PWD/out/gpu" -Wl,-rpath,"$VULKAN_SDK/lib" -Wl,-export_dynamic)
+    gpu=(-Lout/gpu -lbbgpu -Wl,-rpath,@loader_path/gpu -Wl,-rpath,"$PWD/out/gpu" -Wl,-export_dynamic)
     zydis=(-L"$BB_DEPS/lib" -lZydis)
     pie=(-Wl,-no_pie -Wl,-pagezero_size,0x1000)
+    testpie=("${pie[@]}") # tests that map the low 4 GiB need the small __PAGEZERO as well
     cc=("$CC" "${arch_flags[@]}")
     includes=(-I"$BB_DEPS/include" "${includes[@]}")
+    libraries+=(-Wl,-rpath,"$VULKAN_SDK/lib") # @rpath/libvulkan.1.dylib for the test binaries too
 fi
 runtime=(src/runtime*.c)
 # Third-party decoders: compiled once, without this project's -Werror policy.
@@ -136,14 +139,21 @@ echo "Built $PWD/out/bb-probe"
 if [[ ${1:-} == --test ]]; then
     "${cc[@]}" -std=c11 -O2 -g -Wall -Wextra -Werror -pthread "${includes[@]}" -I. -Isrc tests/test_pad.c "${libraries[@]}" -o out/pad-test
     out/pad-test
-    "${cc[@]}" -std=c11 -O2 -g -Wall -Wextra -Werror -pthread "${includes[@]}" -I. -Isrc tests/test_runtime.c "${runtime[@]}" out/libatrac9.a -lm "${gpu[@]}" "${libraries[@]}" -o out/runtime-test
+    "${cc[@]}" -std=c11 -O2 -g -Wall -Wextra -Werror -pthread ${testpie[@]+"${testpie[@]}"} "${includes[@]}" -I. -Isrc tests/test_runtime.c "${runtime[@]}" out/libatrac9.a -lm "${gpu[@]}" "${libraries[@]}" -o out/runtime-test
     out/runtime-test
     "${cc[@]}" -std=c11 -O2 -g -Wall -Wextra -Werror -pthread "${includes[@]}" -Isrc tests/test_file_mods.c -o out/file-mods-test
     out/file-mods-test
-    "${cc[@]}" -std=c11 -O2 -g -Wall -Wextra -Werror -pthread "${includes[@]}" -I. -Isrc tests/test_sema.c "${runtime[@]}" out/libatrac9.a -lm "${gpu[@]}" "${libraries[@]}" -o out/sema-test
+    "${cc[@]}" -std=c11 -O2 -g -Wall -Wextra -Werror -pthread ${testpie[@]+"${testpie[@]}"} "${includes[@]}" -I. -Isrc tests/test_sema.c "${runtime[@]}" out/libatrac9.a -lm "${gpu[@]}" "${libraries[@]}" -o out/sema-test
     out/sema-test
     "${cc[@]}" -std=c11 -D_GNU_SOURCE -O2 -g -Wall -Wextra -Werror "${includes[@]}" -I. -Isrc tests/test_content.c src/runtime_content.c -o out/content-test
     out/content-test
-    "${cc[@]}" -std=c11 -O2 -g -Wall -Wextra -Werror -pthread "${includes[@]}" -Isrc tests/test_cpu_patch.c src/cpu_patch.c "${zydis[@]}" -o out/cpu-patch-test
+    "${cc[@]}" -std=c11 -O2 -g -Wall -Wextra -Werror -pthread ${testpie[@]+"${testpie[@]}"} "${includes[@]}" -Isrc tests/test_cpu_patch.c src/cpu_patch.c "${zydis[@]}" -o out/cpu-patch-test
     out/cpu-patch-test
+    if [[ $(uname -s) == Darwin ]]; then
+        # Rosetta 2: AVX/AVX2/FMA/BMI1/LZCNT/MOVBE/POPCNT must execute; the guest address space must be reservable.
+        "${cc[@]}" -std=c11 -O2 -g -Wall -Wextra -Werror -pthread tests/test_avx_rosetta.c -o out/avx-rosetta-test
+        out/avx-rosetta-test
+        "${cc[@]}" -std=c11 -O2 -g -Wall -Wextra -Werror -pthread "${testpie[@]}" "${includes[@]}" -I. -Isrc tests/test_memory_darwin.c "${runtime[@]}" out/libatrac9.a -lm "${gpu[@]}" "${libraries[@]}" -o out/memory-darwin-test
+        out/memory-darwin-test
+    fi
 fi
