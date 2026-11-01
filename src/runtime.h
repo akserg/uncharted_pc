@@ -77,6 +77,27 @@ void runtime_set_guest_fpu(void);
 /* Guest-visible errno values are FreeBSD's. */
 int32_t runtime_guest_errno(int host_errno);
 void *runtime_low_map(size_t size, int prot);
+/* Host objects the guest holds a pointer to (thread/mutex/cond/rwlock handles, TLS blocks) must lie
+ * below 1 TiB: guest code packs pointers into 40-bit fields. Linux (brk heap) and Windows
+ * (--disable-high-entropy-va) get that from the C heap; macOS has no such heap (Rosetta mallocs at
+ * 0x6000xxxxxxxx), so runtime_lowalloc.c serves these from runtime_low_map chunks. */
+#ifdef __APPLE__
+void *runtime_low_alloc(size_t size);
+void *runtime_low_calloc(size_t count, size_t size);
+void *runtime_low_aligned(size_t alignment, size_t size);
+void runtime_low_free(void *pointer);
+uint64_t runtime_low_live(void);
+#define bb_guest_malloc(size) runtime_low_alloc(size)
+#define bb_guest_calloc(count, size) runtime_low_calloc(count, size)
+#define bb_guest_aligned_alloc(alignment, size) runtime_low_aligned(alignment, size)
+#define bb_guest_free(pointer) runtime_low_free(pointer)
+#else
+#include <stdlib.h>
+#define bb_guest_malloc(size) malloc(size)
+#define bb_guest_calloc(count, size) calloc(count, size)
+#define bb_guest_aligned_alloc(alignment, size) aligned_alloc(alignment, size)
+#define bb_guest_free(pointer) free(pointer)
+#endif
 void *runtime_image_map(size_t size, int prot);
 /* Windows: reserves the PS4 user address range as a placeholder (no-op elsewhere). */
 void runtime_memory_reserve(void);
