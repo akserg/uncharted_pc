@@ -60,5 +60,108 @@ in a Rosetta x86-64 process:
 - `F_PUNCHHOLE` requires the file to be on APFS; `$TMPDIR` is.
 
 ## Result
-_(fill in: date, commit, backend chosen and why, PAGEZERO/no_pie confirmation, page-size findings,
-RWX finding, test output, vmmap excerpt, open issues)_
+
+**M2: guest address space on Darwin/Rosetta** — date 2026-11-01, branch `macos`, MacBook Pro M4 Max, macOS 26.6.2, Apple clang, x86_64 under Rosetta. Source commits (after `fedc79b`): `59116e7` tests + test fixes, `168cfac` backend, `33a6e4d` NOREPLACE replacement; the Result commit follows.
+All runs used `ROSETTA_ADVERTISE_AVX=1` unless stated. Upstream reference used: shadPS4 `src/core/address_space.cpp` (APPLE / `ARCH_X86_64` branches, read via GitHub raw): for the USER range split, constants and "no file-backed exec mapping". Everything else was measured here.
+
+### Acceptance (all pass)
+| Item | Result |
+|---|---|
+| `ROSETTA_ADVERTISE_AVX=1 bash build.sh --test` | exit 0, all 8 tests pass (table below) |
+| aliasing: write through one mapping visible through another | PASS. Same offset at 3 guest addresses (one fixed, two runtime-chosen, one a 4 MiB short view), a `+16 KiB` sub-range, and the runtime's host-side backing view (`runtime_memory_write_backing`) all see the same bytes; a different offset does not alias |
+| `runtime_image_map(64 MiB)` in `[0x400000, 0x80000000)` | PASS: returned `0xbe00000` in the test binary (see "image base" below) |
+| `runtime_low_map(1 GiB)` in `[0x0800000000, 0x1000000000)` | PASS: `0x800000000`; second map `0x840004000` (8 MiB, after the 16 KiB gap) |
+| discard then re-touch reads zero | PASS: direct 32 MiB released/reallocated at the same offset reads zero in every 4 KiB; flexible 4 MiB unmapped/remapped reads zero |
+| RWX mprotect | WORKS (details below) |
+| vmmap of a paused process | below |
+| `grep -rn "MACOS-STUB(M2)" src gpu` | no output (0 M2 stubs left) |
+
+### Task 0: `build.sh --test` (first run, then fixed)
+First run, before any M2 code: pad-test aborted (dyld: `@rpath/libvulkan.1.dylib` not found, test binaries had no SDK rpath); `test_runtime.c` did not compile (`pthread_barrier_t` does not exist on macOS); after that, `runtime-test` hit the M3 `set_gs` stub (`exit(21)`), and then the pool stub (`Assertion ... direct_memory`, line 187); `test_cpu_patch.c` did not compile (`ucontext` needs `_XOPEN_SOURCE`, `gregs[REG_RIP]`, ELF-style asm labels) and after that failed `assert(image==0x20000000)` because test binaries were linked with the default 4 GiB `__PAGEZERO`.
+Fixes: SDK rpath added to `libraries` on Darwin (removed from `gpu`, avoids a duplicate-rpath warning); `testpie` = `-Wl,-no_pie -Wl,-pagezero_size,0x1000` on the memory-mapping test links; `pthread_barrier_*` shim in `compat_darwin.h`; `set_gs` on Darwin records the TCB in a `__thread` variable instead of exiting (still `MACOS-STUB(M3)`: no guest code can read `gs:[0]` yet); `test_cpu_patch.c` Darwin ucontext (`__ss.__rip`), `.globl _name` Mach-O asm labels, `MAP_FIXED_NOREPLACE` as hint.
+Final table (`out/*-test`, all `-Werror`):
+| Test | Result |
+|---|---|
+| pad-test | PASS |
+| runtime-test (`test_runtime.c`) | PASS |
+| file-mods-test | PASS |
+| sema-test | PASS |
+| content-test | PASS |
+| cpu-patch-test (50 cases x 400 trials, rewritten BMI1/LZCNT/MOVBE code executed under Rosetta, 800 breakpoints) | PASS |
+| avx-rosetta-test | PASS |
+| memory-darwin-test | PASS |
+
+### Task 0b: AVX execution (`tests/test_avx_rosetta.c`)
+Executes with inline asm and checks results: `vaddps/vmulps/vsubps ymm`, `vfmadd231ps ymm`, `vpbroadcastd/vpaddd/vpermd ymm`, ymm state across a preemption window, `andn/blsr/blsi/blsmsk/tzcnt`, `lzcnt` (63/64/15), `movbe` 16/32/64 load+store, `popcnt`, and AVX/AVX2/FMA in 4 concurrent threads. SIGILL/SIGSEGV per group is caught and reported.
+**Verdict: AVX executes correctly.** Output with `ROSETTA_ADVERTISE_AVX=1`:
+```
+cpuid: avx=1 fma=1 avx2=1 bmi1=1 bmi2=1 movbe=1 popcnt=1 lzcnt=1 osxsave=1
+xcr0=0x7 (ymm state enabled)
+PASS AVX vaddps... / FMA3 / AVX2 / AVX ymm state / BMI1 / LZCNT / MOVBE / POPCNT / 4 threads
+PASS: AVX, AVX2, FMA, BMI1, LZCNT, MOVBE, POPCNT execute and give correct results
+```
+Output **without** the variable:
+```
+ROSETTA_ADVERTISE_AVX=(unset)
+cpuid: avx=0 fma=0 avx2=0 bmi1=0 bmi2=0 movbe=0 popcnt=1 lzcnt=0 osxsave=0
+PASS (all 8 groups and the thread test, same results)
+```
+Finding: the variable only changes what **cpuid reports**; Rosetta translates and executes the AVX/BMI/LZCNT/MOVBE instructions correctly either way. Without it, `check_cpu()` in `bb-probe` stops (cpuid says no AVX) and `runtime`'s CPU-patch decisions (`BB_CPU_PATCH`: rewrite BMI1/LZCNT/MOVBE when cpuid lacks them) would also see "no AVX". Keep exporting it. Not tested: AVX-512 (not translated), x87/MXCSR state under signals.
+
+### Backend chosen: unlinked sparse file + `mmap(MAP_SHARED|MAP_FIXED)` (spec option 1)
+`pool()`: `mkstemp` in `$TMPDIR` (else `/tmp`), `unlink`, `ftruncate(POOL_SIZE + FLEX_SPAN)` (6.0 GiB at the default 5056 MiB pool), one host-only view with `mmap(MAP_SHARED|MAP_NORESERVE)` at hint `USER_MAX + 1 TiB` (`backing_base`); every guest mapping is `mmap(MAP_SHARED|MAP_FIXED, pool_fd, phys)`. Discard is `fcntl(F_PUNCHHOLE)` (APFS), falling back to `memset` through `backing_base` if it fails. `host_commit` is a no-op. The mach_vm option (2) was **not needed**: aliasing, punch-hole semantics and mprotect all work with the file. Measured with a scratch program before coding: after `F_PUNCHHOLE` the pages read zero **through live mappings** (two aliases and the host view) and neighbouring pages keep their data.
+Why not shm: spec background (size cap). Why this over mach entries: the Linux code shape stays identical and discard has exact zeroing semantics.
+Caveat (open issue 3): the pool is file-backed, so dirty pages can be written to the SSD by the kernel.
+
+### Address-space facts under Rosetta (measured; these changed the design)
+1. **`__PAGEZERO`** is `0x1000` in `out/bb-probe` and in the test binaries (`otool -l | grep -A3 PAGEZERO`: `vmaddr 0 vmsize 0x1000`). With the default 4 GiB the 0x400000 / sub-2 GiB mappings are impossible (the `cpu-patch-test` failure above is that exact case).
+2. **`[0x1000000000, 0x7000000000)` cannot be mapped at all** in a Rosetta x86_64 process: `mmap(MAP_FIXED)` returns `EACCES`; a hint there is ignored and the kernel returns `0x7000000000`. Bisected: last OK below `0xfbfffc000`, first bad `0xfc0000000` (the commpage `0xFC0000000-0xFFFFFFFFF`), then bad until `0x6fffffc000`, first OK `0x7000000000`; 385 samples inside all fail. `0x7000000000` through `0x7fff00000000` map fine. shadPS4 makes the same cut on macOS x86_64 ("GPU-reserved memory ranges from 0x1000000000 - 0x6FFFFFFFFF", `USER_MIN = 0x7000000000`, commpage ends the system-reserved range at `0xFBFFFFFFF`).
+   Consequence (**decision made, please review**): on Apple `USER_MIN = 0x7000000000` (the `[USER_MIN, USER_MAX = 0xfc00000000)` guest range is 560 GiB and still < 2^40), `runtime_low_map` stops at `LOW_MAX = 0xfc0000000` (31 GiB of low space from `0x800000000`). The acceptance range `[0x0800000000, 0x1000000000)` for `runtime_low_map` still holds. Guests that `MAP_FIXED` outside `[0x7000000000, 0xfc00000000)` get `NO_MEMORY` on macOS (tested: `0x1000000000` and `0x100000000` refused, nothing replaced).
+3. **Low 4 GiB is crowded**: Rosetta's `.aot` translation files, dyld, and the host binary's dylibs (SDL, MoltenVK, FFmpeg, ...) map between `0x1000` and about `0xa40000` and beyond, so `0x400000` is taken in the test binary (regions listed in the test output). `runtime_image_map` is first-fit with a 1 MiB step, so it landed at `0xbe00000` (and a second 8 MiB map at `0xfe00000`). The PS4 base `0x400000` is not obtainable in a process that links this many dylibs; the spec requires only "below 2 GiB". The Uncharted `TGenericOffsetPtr` constraint (image pointers as [0, 2 GiB)) is satisfied.
+4. Where non-hinted allocations go: lowest free address first (`mmap(NULL)` gave `0x2041f7000`), malloc'd memory lives at `0x6000xxxxxxxx` / `0x7f89xxxxxxxx` (see issue 2).
+
+### Probe strategy for free ranges (hazard: never clobber Rosetta/dyld)
+- **User range**: `runtime_memory_reserve()` (called from `pool()` and, on Apple, early in `main()` before any Vulkan/Metal/SDL allocation) maps the whole `[USER_MIN, USER_MAX)` once as `PROT_NONE|MAP_PRIVATE|MAP_ANON|MAP_NORESERVE` **without** `MAP_FIXED` (address is a hint); it is accepted only if the result equals `USER_MIN`, otherwise it unmaps and prints the occupants (`mach_vm_region` walk) and exits 21 (like the Windows path). Every later `MAP_FIXED` (host_map/unmap) lands inside that reservation, so it replaces only our own PROT_NONE pages. `host_map`/`host_unmap` refuse addresses outside the range (`in_user_range`). Unmapping re-reserves with a `PROT_NONE` `MAP_FIXED` anon mapping so the range stays ours.
+- **Low and image ranges**: `bb_darwin_map_at()` in `compat_darwin.h`: `mmap` without `MAP_FIXED`, accept only `result == requested`, otherwise `munmap` the stray mapping and continue the probe loop. Used by `runtime_low_map`, `runtime_image_map`, and the `cpu_patch.c` thunk allocator (`near_image`). The kernel honours the hint whenever the range is free (verified for `0x400000`, `0x20000000`, `0x70000000`, `0x800000000`), and never replaces an existing mapping without `MAP_FIXED`.
+- No `MAP_FIXED` anywhere else.
+
+### Page size
+`vm_page_size`, `getpagesize()`, `sysconf(_SC_PAGESIZE)` and `hw.pagesize` all report **4096** inside the Rosetta process; `vm_kernel_page_size` is 16384; `vmmap` says "Process VM page size: 4096, Kernel VM page size: 16384". Rosetta accepts `MAP_FIXED` at 4 KiB-aligned addresses (tested `0x401000`), so the 16 KiB runtime `PAGE` is only a runtime convention here, not a requirement; the runtime still rejects non-16 KiB-aligned guest addresses (tested) and uses 16 KiB-aligned file offsets. `mprotect` granularity under Rosetta is 4 KiB; the GPU page-tracking code (M5) works in its own page size and must not assume the host's.
+
+### RWX finding
+- anonymous `PROT_READ|WRITE|EXEC` `mmap` (non-fixed hint and fixed): **works** and the code executes (thunk memory in `cpu_patch.c`).
+- `mmap(PROT_EXEC, MAP_SHARED, file_fd)` **fails with `EPERM`** (same as shadPS4's note that exec mappings cannot be file-backed on macOS), but `mprotect` of an existing RW `MAP_SHARED` file mapping to `RWX`, `RX` and back **works**, and code executes there. So `host_map` maps without `PROT_EXEC` and adds it with `mprotect` afterwards; guest `sceKernelMapDirectMemory(prot=RWX)` therefore works (tested, a `ret` runs). No need for the RW-then-RX workaround.
+
+### vmmap (paused `memory-darwin-test`, `BB_TEST_PAUSE=15`, pid 30897)
+`bb-probe` itself cannot reach the memory code without a real `boot.bin` (not available), so the paused process is the test binary, which links the same `src/runtime*.c`, with the same link flags as `bb-probe` (`-no_pie`, `__PAGEZERO` 0x1000).
+```
+Code Type: X86-64 (translated)    Process VM page size: 4096 bytes    Kernel VM page size: 16384 bytes
+VM_ALLOCATE                       be00000-fe00000     [ 64.0M  64.0M  64.0M  0K] rw-/rwx SM=PRV           <- guest image (64 MiB, below 2 GiB)
+VM_ALLOCATE (reserved)            fe00000-10600000    [ 8192K  ...                                         <- second image map region follows
+mapped file                    7000000000-7004000000  [ 64.0M  8192K  0K  0K]  rw-/rwx SM=S/A   .../T/bb-guest-memory.rVOCsn   <- 64 MiB guest view of the pool
+VM_ALLOCATE                    7004000000-fc00000000  [559.9G  0K  0K  0K]      ---/rwx SM=NUL               <- PROT_NONE user-range reservation
+mapped file                   1fc00000000-1fd7c000000 [  5.9G  0K  0K  0K]      rw-/rwx SM=S/A   .../T/bb-guest-memory.rVOCsn   <- host view of the whole pool file (6.0 GiB)
+```
+Physical footprint 79.4 MB with 64 MiB image written and 8 MiB of the pool touched.
+
+### Darwin substitutions made in M2 (non-stub)
+- `runtime_memory.c`: new `#elif defined(__APPLE__)` host-mapping branch between `_WIN32` and Linux (Linux branch restored to upstream text); `USER_MIN` 0x7000000000 + new `LOW_MAX` on Apple; includes `<mach/mach.h>`, `<mach/mach_vm.h>`.
+- `compat_darwin.h`: removed the `MAP_FIXED_NOREPLACE = 0` macro and `bb_darwin_hint_missed`; added `bb_darwin_map_at`; added `pthread_barrier_*` shim (mutex+cond).
+- `cpu_patch.c` `near_image`, `runtime_memory.c` `runtime_low_map`/`runtime_image_map`: Apple branches use `bb_darwin_map_at`.
+- `probe.c`: Apple calls `runtime_memory_reserve()` early (the Windows reason); `MACOS-NOTE(M2)` for malloc replaced by a tagged `MACOS-STUB(M3)` with the measurement.
+- `runtime_thread.c`: Darwin `set_gs` records the TCB per thread (see Task 0).
+- `build.sh`: SDK rpath in `libraries`, `testpie`, the two new tests wired for Darwin only (after the existing tests; AVX test first).
+- Tests: `tests/test_avx_rosetta.c`, `tests/test_memory_darwin.c` (new), `tests/test_cpu_patch.c` (Darwin ucontext, asm labels, hint).
+
+### Remaining stubs (5, none tagged M2)
+`runtime_thread.c set_gs` (M3), `probe.c fault()` RIP (M3, untested), `probe.c watchdog()` (M3), `probe.c main()` malloc-below-1-TiB (M3, new tag, see below), `gpu/shim/window.cpp` (M4).
+
+### Open issues / for the reviewer and M3
+1. **Decision needed: `USER_MIN = 0x7000000000` on Apple.** Anything in the game or the GPU code that assumes guest user addresses start at `0x1000000000` would break (I found no such constant in `src` or `gpu/shim`, but did not run a guest). The alternative is none: the kernel forbids the lower range.
+2. **Host heap is not below 1 TiB** (Rosetta: malloc at `0x6000xxxxxxxx`, `0x7f89xxxxxxxx`). `probe.c` says handles given to the guest (thread handles, TLS/TCB blocks, mutex/sema handles) must stay below 1 TiB because the guest packs 40-bit pointers. On Windows `--disable-high-entropy-va` achieves this; on Linux the brk heap with `mallopt`. A low allocator is needed for M3: a custom `malloc_zone_t` or an arena carved from `runtime_low_map` for those `calloc`/`aligned_alloc` sites (`runtime_thread.c` `new_thread`/`tls_block_alloc`, `runtime_mutex.c`, `runtime_rwlock.c`, `runtime_sema.c`, `runtime_file.c`, `runtime_ajm.c`, `runtime_trophy.c`). Not done in M2.
+3. **The pool is file-backed**: the kernel may write dirty guest pages to `$TMPDIR` (on the Data volume) under memory pressure and periodically; it is an unlinked sparse file, so disk use is only touched pages (up to ~6 GiB at worst) and a nearly full disk causes `SIGBUS`, not `ENOMEM`. If M5 shows SSD write traffic or stalls, switch to `mach_make_memory_entry_64` (anonymous shared) + `mach_vm_map`; discard would then need `memset`/re-create instead of punch-hole.
+4. `0x400000` image base is not available (issue 3 of address-space facts). If the game requires exactly `0x400000` the host binary would have to be moved/linked small, or loaded via zerofill reservations like shadPS4 (`.zerofill` sections reserve `[0x400000, 0xFBFFFFFFF]` and the user range at link time). Not needed so far.
+5. The reservation `mmap` of 560 GiB relies on the hint being honoured at `0x7000000000`; it works now (dyld, Rosetta and malloc zones are elsewhere), but a different macOS or a library that maps there first makes `runtime_memory_reserve()` exit 21 with the occupant list. Linking zerofill sections (shadPS4's approach) would make this deterministic.
+6. `bb-probe` was not run on a guest (no `boot.bin`): `runtime_image_map` is exercised only by the test. `ROSETTA_ADVERTISE_AVX=1 out/bb-probe` still prints the usage line (precondition 3 passed).
+7. Tests need the variable only for linking `libbbgpu` consumers (cpuid in `check_cpu()` is bb-probe only); `memory-darwin-test` and the others also pass without it except where they initialise the GPU library, which was not checked.
+8. `ld: warning: -no_pie is deprecated` remains (works).
