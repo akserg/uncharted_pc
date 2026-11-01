@@ -1,6 +1,7 @@
 #define _GNU_SOURCE
 #include <assert.h>
 #include <unistd.h>
+_Thread_local int runtime_ndgi_open; /* normally defined in runtime_fiber.c; pad test does not link it */
 #include "../src/runtime_pad.c"
 
 static int capture;
