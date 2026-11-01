@@ -1,4 +1,5 @@
 // bbport: SDL3 window for the Vulkan swapchain (X11 or Wayland).
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <string>
@@ -114,6 +115,16 @@ WindowSDL::WindowSDL(s32 width_, s32 height_, const char* title) : width{width_}
     if (driver && !std::strcmp(driver, "windows")) {
         window_info.type = WindowSystemType::Windows;
         window_info.render_surface = SDL_GetPointerProperty(wp, SDL_PROP_WINDOW_WIN32_HWND_POINTER, nullptr);
+    } else
+#endif
+#ifdef __APPLE__
+    if (driver && !std::strcmp(driver, "cocoa")) {
+        // MACOS-STUB(M4): the Metal surface is wired in M4. It will be
+        // window_info.type = WindowSystemType::Metal and render_surface = SDL_Metal_GetLayer(
+        // SDL_Metal_CreateView(window)) (SDL3). Until then the window cannot present: stop with a clear message.
+        LOG_ERROR(Frontend, "macOS: the Cocoa/Metal window surface is not implemented yet (milestone M4)");
+        std::fputs("STOP: macOS Cocoa/Metal window surface is not implemented yet (milestone M4)\n", stderr);
+        std::abort();
     } else
 #endif
     if (driver && !std::strcmp(driver, "x11")) {

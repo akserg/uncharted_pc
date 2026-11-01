@@ -1,5 +1,10 @@
 /* Minimal x86-64 native loader experiment. Not a PS4 emulator or game port. */
 #define _GNU_SOURCE
+#ifdef __APPLE__
+/* <ucontext.h> needs _XOPEN_SOURCE on macOS; _DARWIN_C_SOURCE keeps the rest of libSystem visible. */
+#define _XOPEN_SOURCE 600
+#define _DARWIN_C_SOURCE
+#endif
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -20,7 +25,9 @@
 #include <windows.h>
 #else
 #include <sys/mman.h>
+#ifndef __APPLE__
 #include <malloc.h>
+#endif
 #include <unistd.h>
 #include <signal.h>
 #include <ucontext.h>
@@ -29,6 +36,23 @@
 #include <execinfo.h>
 #include <sys/syscall.h>
 #include <sys/uio.h>
+#ifdef __APPLE__
+#include <mach/mach.h>
+#include <mach/mach_vm.h>
+#undef round_page /* <mach/vm_param.h> macros; probe.c has its own round_page() */
+#undef trunc_page
+#include <pthread.h>
+/* Darwin ucontext: the x86-64 thread state lives behind uc_mcontext (a pointer). Registers of the
+ * interrupted code are read and written here by the fault and watchdog handlers. */
+#define UC_RIP(uc) ((uc)->uc_mcontext->__ss.__rip)
+#define UC_RBP(uc) ((uc)->uc_mcontext->__ss.__rbp)
+#define UC_RDI(uc) ((uc)->uc_mcontext->__ss.__rdi)
+static uint64_t gettid(void) { uint64_t tid=0; pthread_threadid_np(NULL,&tid); return tid; }
+#else
+#define UC_RIP(uc) ((uc)->uc_mcontext.gregs[REG_RIP])
+#define UC_RBP(uc) ((uc)->uc_mcontext.gregs[REG_RBP])
+#define UC_RDI(uc) ((uc)->uc_mcontext.gregs[REG_RDI])
+#endif
 #endif
 
 typedef struct { uint64_t address, size, flags; } Segment;
@@ -132,7 +156,7 @@ static ABI __attribute__((noreturn)) void unresolved(uint32_t id, uintptr_t argu
     uintptr_t caller=(uintptr_t)__builtin_return_address(0)-(uintptr_t)image;
     for (uint64_t m=0;m<module_count;++m)
         if (caller>=modules[m].base && caller-modules[m].base<modules[m].size)
-            printf("Caller in linked module %" PRIu64 " (%s): +0x%" PRIxPTR "\n",m,m==0 ? "libc.prx" : "system module",caller-modules[m].base);
+            printf("Caller in linked module %" PRIu64 " (%s): +0x%" PRIxPTR "\n",m,m==0 ? "libc.prx" : "system module",(uintptr_t)(caller-modules[m].base));
     runtime_report();
     puts(entered_game ? "Original guest entry instructions executed; game initialization is incomplete." :
                         "Native libc initialization is incomplete; game entry has not run.");
@@ -141,7 +165,13 @@ static ABI __attribute__((noreturn)) void unresolved(uint32_t id, uintptr_t argu
 }
 #ifndef _WIN32
 /* enter_on_stack(entry, arg0, arg1, stack_top): call entry(arg0,arg1) on a new stack. */
+#ifdef __APPLE__
+/* Mach-O C symbols get a leading underscore, but the asm below defines the bare name: the label
+ * makes the C declaration refer to the symbol the asm defines (the asm itself is untouched). */
+void enter_on_stack(void *entry, void *arg0, void *arg1, void *top) __asm__("enter_on_stack");
+#else
 void enter_on_stack(void *entry, void *arg0, void *arg1, void *top);
+#endif
 __asm__(".text\n.globl enter_on_stack\nenter_on_stack:\n"
         " push %rbp\n mov %rsp,%rbp\n and $-16,%rcx\n mov %rcx,%rsp\n"
         " mov %rdi,%rax\n mov %rsi,%rdi\n mov %rdx,%rsi\n call *%rax\n"
@@ -386,9 +416,11 @@ static void fault(int sig, siginfo_t *info, void *context) {
     /* Instructions this CPU lacks (cpu_patch.c): a rewritten breakpoint (rip after the int3) or
      * one the scan missed continue in a thunk. */
     if (sig == SIGTRAP || sig == SIGILL) {
-        greg_t *rip = &((ucontext_t *)context)->uc_mcontext.gregs[REG_RIP];
+        /* MACOS-STUB(M3): on Darwin RIP comes from the __ss thread state; not yet exercised under Rosetta
+         * (cpu_patch breakpoints are only reachable once a guest runs). */
+        __typeof__(&UC_RIP((ucontext_t *)context)) rip = &UC_RIP((ucontext_t *)context);
         uint64_t to = (uint64_t)*rip;
-        if (sig == SIGTRAP ? cpu_patch_breakpoint(&to, to - 1) : cpu_patch_illegal(&to)) { *rip = (greg_t)to; return; }
+        if (sig == SIGTRAP ? cpu_patch_breakpoint(&to, to - 1) : cpu_patch_illegal(&to)) { *rip = (__typeof__(*rip))to; return; }
     }
     /* GPU page tracking (write-protected guest pages) is resolved first. */
     if (gpu_enabled && sig == SIGSEGV && bbgpu_handle_fault(context, info->si_addr)) return;
@@ -404,7 +436,7 @@ static void fault(int sig, siginfo_t *info, void *context) {
     }
     /* The process is terminating: dladdr/snprintf are acceptable here. */
     ucontext_t *uc = context;
-    uintptr_t rip = (uintptr_t)uc->uc_mcontext.gregs[REG_RIP];
+    uintptr_t rip = (uintptr_t)UC_RIP(uc);
     char line[512];
     Dl_info where;
     if (rip - (uintptr_t)image < 0x10000000)
@@ -441,18 +473,24 @@ static void write_hex(char *out, uint64_t v) {
 }
 static void dump_frames(ucontext_t *uc) {
     char line[] = "  tid=0000000000000000 rip=0000000000000000 image-relative=0000000000000000 host-relative=0000000000000000\n";
-    uintptr_t rip=(uintptr_t)uc->uc_mcontext.gregs[REG_RIP], rbp=(uintptr_t)uc->uc_mcontext.gregs[REG_RBP];
+    uintptr_t rip=(uintptr_t)UC_RIP(uc), rbp=(uintptr_t)UC_RBP(uc);
     uint64_t tid=(uint64_t)gettid();
     /* First argument register: the lock address when a thread waits on a futex. */
     char arg[]="  tid=0000000000000000 rdi=0000000000000000\n";
-    write_hex(arg+6,tid); write_hex(arg+27,(uint64_t)uc->uc_mcontext.gregs[REG_RDI]);
+    write_hex(arg+6,tid); write_hex(arg+27,(uint64_t)UC_RDI(uc));
     { ssize_t written_=write(2,arg,sizeof(arg)-1); (void)written_; }
     for (int depth=0; depth<24; ++depth) {
         write_hex(line+6,tid); write_hex(line+27,rip); write_hex(line+59,rip-(uintptr_t)image); write_hex(line+90,rip-exe_base);
         { ssize_t written_=write(2,line,sizeof(line)-1); (void)written_; }
         uintptr_t frame[2];
+#ifdef __APPLE__
+        /* mach_vm_read_overwrite fails with an error code instead of faulting on a bad frame. */
+        mach_vm_size_t got=0;
+        if (!rbp || mach_vm_read_overwrite(mach_task_self(),(mach_vm_address_t)rbp,sizeof(frame),(mach_vm_address_t)frame,&got)!=KERN_SUCCESS || got!=sizeof(frame)) break;
+#else
         struct iovec local={frame,sizeof(frame)}, remote={(void *)rbp,sizeof(frame)};
         if (!rbp || process_vm_readv(getpid(),&local,1,&remote,1,0)!=(ssize_t)sizeof(frame)) break;
+#endif
         if (frame[0]<=rbp) break;
         rbp=frame[0]; rip=frame[1];
     }
@@ -463,6 +501,10 @@ static void watchdog(int sig, siginfo_t *info, void *context) {
     const char head[]="STOP: watchdog timeout; thread stacks:\n";
     { ssize_t written_=write(2,head,sizeof(head)-1); (void)written_; }
     dump_frames(context);
+#ifdef __APPLE__
+    /* MACOS-STUB(M3): no /proc/self/task and no tgkill: only the thread that received SIGALRM is dumped.
+     * M3 keeps a table of guest pthread_t values and signals each with pthread_kill(SIGUSR2). */
+#else
     int dir=open("/proc/self/task",O_RDONLY|O_DIRECTORY);
     char buffer[4096];
     long n;
@@ -474,6 +516,7 @@ static void watchdog(int sig, siginfo_t *info, void *context) {
             if (tid>0 && tid!=self) { syscall(SYS_tgkill,getpid(),tid,SIGUSR2); usleep(20000); }
             at+=d->reclen;
         }
+#endif
     usleep(100000);
     _exit(128 + sig);
 }
@@ -1131,7 +1174,11 @@ void runtime_restart(void) {
     TerminateProcess(GetCurrentProcess(),0);
 #else
     puts("Runtime: restarting through run.sh");
+#ifdef __APPLE__
+    for (long fd=3, last=sysconf(_SC_OPEN_MAX); fd<last; ++fd) close((int)fd); /* no close_range */
+#else
     syscall(SYS_close_range, 3u, ~0u, 0u);
+#endif
     execlp("bash", "bash", "run.sh", (char *)NULL);
     perror("runtime_restart: exec");
     _exit(1);
@@ -1143,8 +1190,13 @@ int main(int argc, char **argv) {
 #ifndef _WIN32
     /* Keep host heap objects handed to the guest (thread handles, TLS) in the
        non-PIE brk heap, i.e. below 1 TiB: the guest packs pointers into 40 bits. */
+#ifdef __APPLE__
+    /* MACOS-NOTE(M2): no mallopt on macOS (libmalloc zones). Whether host heap objects stay below
+     * 1 TiB without the non-PIE brk heap is checked in M2. */
+#else
     mallopt(M_ARENA_MAX,1);
     mallopt(M_MMAP_THRESHOLD,32*1024*1024);
+#endif
 #endif
     if (argc == 2 && !strcmp(argv[1], "--vulkan-only")) return vulkan_smoke();
     if (argc == 2 && !strcmp(argv[1], "--controller-info")) return runtime_pad_tool(0,100);

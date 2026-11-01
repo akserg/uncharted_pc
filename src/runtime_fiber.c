@@ -87,8 +87,16 @@ static __attribute__((noinline)) FiberThread *this_thread(void) {
 
 /* fiber_swap(save, load): suspend here (*save = stack pointer) and resume the context whose
  * stack pointer is load. fiber_start begins a fresh context: rbx = GuestFiber. */
+#ifdef __APPLE__
+/* Mach-O prefixes C symbols with '_'; the asm below uses the bare names (fiber_start also calls
+ * fiber_main by its bare name). Asm labels make the C declarations match; the asm is untouched. */
+ABI void fiber_swap(uint64_t *save,uint64_t load) __asm__("fiber_swap");
+ABI void fiber_start(void) __asm__("fiber_start");
+ABI __attribute__((used,noreturn)) void fiber_main(GuestFiber *fiber) __asm__("fiber_main");
+#else
 ABI void fiber_swap(uint64_t *save,uint64_t load);
 ABI void fiber_start(void);
+#endif
 __asm__(".text\n"
         ".globl fiber_swap\nfiber_swap:\n"
         " push %rbp\n push %rbx\n push %r12\n push %r13\n push %r14\n push %r15\n"

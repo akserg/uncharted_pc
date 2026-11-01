@@ -313,12 +313,19 @@ static int pool(void) {
 /* Direct memory occupies [0,POOL_SIZE) of the memfd, flexible memory [POOL_SIZE,+FLEX_SPAN). */
 static int pool(void) {
     if (pool_fd>=0) return 0;
+#ifdef __APPLE__
+    /* MACOS-STUB(M2): macOS has no memfd_create; the guest memory pool (one shared backing that every
+     * mapping of a physical range aliases) is not implemented yet. Fails like an exhausted pool. */
+    fputs("Runtime: guest memory pool is not implemented on macOS yet (M2)\n",stderr);
+    return -1;
+#else
     pool_fd=memfd_create("bb-guest-memory", MFD_CLOEXEC);
     if (pool_fd<0 || ftruncate(pool_fd,(off_t)(POOL_SIZE+FLEX_SPAN))) return -1;
     void *view=mmap(NULL,POOL_SIZE+FLEX_SPAN,PROT_READ|PROT_WRITE,MAP_SHARED|MAP_NORESERVE,pool_fd,0);
     if (view==MAP_FAILED) return -1;
     backing_base=view;
     return 0;
+#endif
 }
 void runtime_memory_reserve(void) {}
 static int host_commit(uint64_t phys, uint64_t size) { (void)phys; (void)size; return 0; }
@@ -331,7 +338,12 @@ static int host_map(uintptr_t address, uint64_t size, int prot, int reserved, ui
 static int host_unmap(uintptr_t address, uint64_t size) { return munmap((void *)address,size); }
 static int host_protect(uintptr_t address, uint64_t size, int prot) { return mprotect((void *)address,size,prot); }
 static void host_discard(uint64_t phys, uint64_t size) {
+#ifdef __APPLE__
+    /* MACOS-STUB(M2): no fallocate(PUNCH_HOLE); with no pool (see pool()) there is nothing to discard. */
+    (void)phys; (void)size;
+#else
     fallocate(pool_fd,FALLOC_FL_PUNCH_HOLE|FALLOC_FL_KEEP_SIZE,(off_t)phys,(off_t)size);
+#endif
 }
 #endif
 static void queue_hook(int kind, uintptr_t address, uint64_t size) {
@@ -773,6 +785,9 @@ void *runtime_low_map(size_t size, int prot) {
     void *p=MAP_FAILED;
     while (low_next+size<=USER_MIN) {
         p=mmap((void *)low_next,size,prot,MAP_PRIVATE|MAP_ANONYMOUS|MAP_FIXED_NOREPLACE,-1,0);
+#ifdef __APPLE__
+        if (bb_darwin_hint_missed(p,(void *)low_next,size)) p=MAP_FAILED; /* no NOREPLACE: hint only */
+#endif
         low_next+=size+PAGE; /* unmapped gap catches overruns */
         if (p!=MAP_FAILED) break;
     }
@@ -794,6 +809,9 @@ void *runtime_image_map(size_t size, int prot) {
         p=VirtualAlloc((void *)at,size,MEM_RESERVE|MEM_COMMIT,win_prot(prot));
 #else
         p=mmap((void *)at,size,prot,MAP_PRIVATE|MAP_ANONYMOUS|MAP_FIXED_NOREPLACE,-1,0);
+#ifdef __APPLE__
+        if (bb_darwin_hint_missed(p,(void *)at,size)) p=MAP_FAILED; /* no NOREPLACE: hint only */
+#endif
         if (p==MAP_FAILED) p=NULL;
 #endif
     }

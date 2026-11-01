@@ -23,6 +23,9 @@
 #else
 #include <sys/mman.h>
 #endif
+#ifdef __APPLE__
+#include "compat_darwin.h"
+#endif
 
 enum { NEED_BMI1=1, NEED_LZCNT=2, NEED_MOVBE=4 };
 enum { LZCNT, TZCNT, ANDN, BLSR, BLSMSK, BLSI, BEXTR, MOVBE_LOAD, MOVBE_STORE, KINDS };

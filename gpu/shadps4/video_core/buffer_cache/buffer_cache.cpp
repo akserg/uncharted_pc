@@ -194,9 +194,9 @@ bool BufferCache::DownloadOnSideQueue(VAddr page, u64 length) {
     const u64 first_block = page >> block_shift;
     const u64 last_block = (page + length - 1) >> block_shift;
     const Buffer* arena = GetArena(first_block, last_block);
-    const VAddr window_start = std::max(Common::AlignDown(page, Window), arena->cpu_addr);
-    const VAddr window_end = std::min(
-        std::max(Common::AlignDown(page, Window) + Window, page + length),
+    const VAddr window_start = std::max<VAddr>(Common::AlignDown(page, Window), arena->cpu_addr);
+    const VAddr window_end = std::min<VAddr>(
+        std::max<VAddr>(Common::AlignDown(page, Window) + Window, page + length),
         arena->cpu_addr + arena->size_bytes);
     boost::container::small_vector<VAddr, 16> pages;
     u64 write_tick = 0;
@@ -686,7 +686,7 @@ std::unique_ptr<u32[]> gpu_use_frame{new u32[(GpuUseHigh - GpuUseLow) >> 12]{}};
 
 void NoteGpuUse(VAddr address, u64 size) {
     const VAddr begin = std::max(address, GpuUseLow);
-    const VAddr end = std::min(address + size, GpuUseHigh);
+    const VAddr end = std::min<VAddr>(address + size, GpuUseHigh);
     if (begin >= end) {
         return;
     }

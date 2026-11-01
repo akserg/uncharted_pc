@@ -20,7 +20,9 @@
 #else
 #include <sys/syscall.h>
 #include <sys/mman.h>
+#ifndef __APPLE__
 #include <asm/prctl.h>
+#endif
 #endif
 #define ERR(n) ((int32_t)(UINT32_C(0x80020000)|(n)))
 #define ATTR_MAGIC UINT32_C(0x41545452)
@@ -84,6 +86,16 @@ static void set_gs(void *base) {
     if (!TlsSetValue(tls_slot,base)) { fprintf(stderr,"STOP: TlsSetValue failed (%lu)\n",GetLastError()); exit(21); }
 }
 #define tls_block_alloc(size) _aligned_malloc(size,64)
+#elif defined(__APPLE__)
+static void set_gs(void *base) {
+    /* MACOS-STUB(M3): macOS has no arch_prctl(ARCH_SET_GS). M3 follows the Windows path: patch_tcb_loads
+     * (probe.c) rewrites the guest's gs:[0] loads to a pthread-TSD displacement (key*8) and this stores
+     * the TCB with pthread_setspecific. Until then no guest thread can be attached. */
+    (void)base;
+    fputs("STOP: guest TLS (GS base) is not implemented on macOS yet (M3)\n",stderr);
+    exit(21);
+}
+#define tls_block_alloc(size) aligned_alloc(64,size)
 #else
 static void set_gs(void *base) {
     if (syscall(SYS_arch_prctl,ARCH_SET_GS,(unsigned long)base)) { perror("STOP: arch_prctl(ARCH_SET_GS)"); exit(21); }
@@ -252,7 +264,11 @@ static ABI int32_t attr_set_guard(ThreadAttr **slot,uint64_t size) {
 static void set_host_name(const char *name) {
     char host[16]={0};
     memcpy(host,name,strnlen(name,sizeof(host)-1));
+#ifdef __APPLE__
+    pthread_setname_np(host); /* macOS names only the calling thread */
+#else
     pthread_setname_np(pthread_self(),host);
+#endif
 }
 #ifdef _WIN32
 #define exit_setjmp(t) bb_setjmp((t)->exit_jump)

@@ -761,7 +761,7 @@ struct PM4CmdWriteData {
 
     template <typename T>
     T Address() const {
-        return reinterpret_cast<T>(addr64);
+        return (T)(addr64); // C-style: T may be an integer type whose width differs from u64 (macOS)
     }
 };
 

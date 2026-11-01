@@ -229,6 +229,18 @@ static ABI int32_t guest_getrusage(int who,GuestRusage *out) {
     compat_cpu_times(who,&user,&kernel);
     out->utime=(GuestTimeval){user/1000000,user%1000000};
     out->stime=(GuestTimeval){kernel/1000000,kernel%1000000};
+#elif defined(__APPLE__)
+    if (who==0) {
+        struct rusage r;
+        getrusage(RUSAGE_SELF,&r);
+        out->utime=(GuestTimeval){r.ru_utime.tv_sec,r.ru_utime.tv_usec};
+        out->stime=(GuestTimeval){r.ru_stime.tv_sec,r.ru_stime.tv_usec};
+    } else { /* no RUSAGE_THREAD: the thread's CPU time is reported as user time */
+        struct timespec t;
+        clock_gettime(CLOCK_THREAD_CPUTIME_ID,&t);
+        out->utime=(GuestTimeval){t.tv_sec,t.tv_nsec/1000};
+        out->stime=(GuestTimeval){0,0};
+    }
 #else
     struct rusage r;
     getrusage(who==0 ? RUSAGE_SELF : RUSAGE_THREAD,&r);
@@ -244,6 +256,8 @@ static ABI int32_t guest_sysctl(const int32_t *name,uint32_t namelen,void *old,u
         if (!old || !oldlen) return fail_posix(EINVAL);
 #ifdef _WIN32
         if (compat_random(old,(size_t)*oldlen)) return fail_posix(EIO);
+#elif defined(__APPLE__)
+        arc4random_buf(old,(size_t)*oldlen);
 #else
         if (getrandom(old,(size_t)*oldlen,0)<0) return fail_posix(errno);
 #endif

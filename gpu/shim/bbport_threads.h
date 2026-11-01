@@ -7,6 +7,9 @@
 
 #include <algorithm>
 #include <thread>
+#ifdef __APPLE__
+#include <pthread/qos.h>
+#endif
 #ifdef _WIN32
 #include <bit>
 #include <windows.h>
@@ -57,6 +60,29 @@ struct ScopedNormalPriority {
     ~ScopedNormalPriority() {
         SetThreadPriority(GetCurrentThread(), previous);
     }
+};
+#elif defined(__APPLE__)
+
+/// Hardware threads available to the process (macOS has no affinity masks).
+inline unsigned Available() {
+    return std::max(1u, std::thread::hardware_concurrency());
+}
+
+/// Background QoS: the scheduler keeps the thread on efficiency resources and below the game's threads.
+inline void MakeBackground() {
+    background_thread = true;
+    pthread_set_qos_class_self_np(QOS_CLASS_BACKGROUND, 0);
+}
+
+inline void MakeBelowNormal() {
+    background_thread = true;
+    pthread_set_qos_class_self_np(QOS_CLASS_UTILITY, 0);
+}
+
+/// As on Linux: nothing to restore.
+struct ScopedNormalPriority {
+    ScopedNormalPriority() {}
+    ~ScopedNormalPriority() {}
 };
 #else
 

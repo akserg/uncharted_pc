@@ -56,6 +56,12 @@ static void sleep_until(uint64_t deadline) {
 #ifdef _WIN32
     /* winpthreads' clock_nanosleep only takes CLOCK_REALTIME (EINVAL otherwise). */
     for (uint64_t now=now_ns(); now<deadline; now=now_ns()) compat_sleep_ns(deadline-now);
+#elif defined(__APPLE__)
+    /* macOS has no clock_nanosleep(TIMER_ABSTIME): sleep the remaining time until the deadline. */
+    for (uint64_t now=now_ns(); now<deadline; now=now_ns()) {
+        struct timespec rest={(time_t)((deadline-now)/1000000000u),(long)((deadline-now)%1000000000u)};
+        nanosleep(&rest,NULL);
+    }
 #else
     struct timespec t={(time_t)(deadline/1000000000u),(long)(deadline%1000000000u)};
     while (clock_nanosleep(CLOCK_MONOTONIC,TIMER_ABSTIME,&t,NULL)) {}

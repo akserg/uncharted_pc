@@ -11,6 +11,9 @@ typedef bb_jmp_buf sigjmp_buf;
 #else
 #include <setjmp.h>
 #endif
+#ifdef __APPLE__
+#include "compat_darwin.h"
+#endif
 /* Recovery point for speculative guest memory reads on this thread (probe.c fault handler). */
 extern __thread sigjmp_buf *runtime_fault_recover;
 /* Restarts the game (in-game settings menu, render resolution change). */
