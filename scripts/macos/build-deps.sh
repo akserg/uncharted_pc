@@ -147,6 +147,15 @@ if [[ ! -f $BB_DEPS/lib/pkgconfig/libavcodec.pc ]]; then
       make install )
 fi
 
+# --- epoll-shim 0.0.20240608 (static; kqueue-backed <sys/epoll.h> for the PS4 net library, as
+# shadPS4 does on macOS: find_package(epoll-shim CONFIG)) -----------------------------------------
+if [[ ! -f $BB_DEPS/lib/cmake/epoll-shim/epoll-shim-config.cmake ]]; then
+    step epoll-shim v0.0.20240608
+    fetch epoll-shim https://github.com/jiixyj/epoll-shim/archive/refs/tags/v0.0.20240608.tar.gz
+    cmake_lib epoll-shim . -DBUILD_TESTING=OFF -DALLOWS_ONESHOT_TIMERS_WITH_TIMEOUT_ZERO_EXITCODE=0 \
+        -DBUILD_SHARED_LIBS=OFF
+fi
+
 # --- Header-only: Boost 1.83.0 (headers), robin-map 1.2.1, VMA 3.0.1, nlohmann_json 3.11.3 ----
 if [[ ! -f $BB_DEPS/include/boost/version.hpp ]]; then
     step Boost 1.83.0 headers
