@@ -6,16 +6,31 @@ backend stubbed so the binary starts and fails with a clear "no cocoa yet" messa
 
 ## Preconditions
 - macOS 15.4 or newer, Xcode Command Line Tools, Rosetta installed (`softwareupdate --install-rosetta`).
-- x86_64 Homebrew: `arch -x86_64 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"` → installs to `/usr/local`.
-- Every brew/build command in this project runs under `arch -x86_64`. Verify with `arch` printing `i386`.
+- LunarG Vulkan SDK for macOS installed (https://vulkan.lunarg.com/sdk/home#mac); `source ~/VulkanSDK/<ver>/setup-env.sh`.
+  Verify `file $VULKAN_SDK/lib/libvulkan.dylib` lists x86_64.
+- Build tools from arm64 Homebrew: `brew install cmake ninja pkg-config nasm`.
+- **No x86_64 Homebrew** (unsupported since Homebrew 7.0). See README "Toolchain".
 
 ## Tasks
 0. `git apply docs/macos/M0-linux-build-fixes.patch` (libav link in build.sh, two -Werror fixes, test_pad.c). Commit as `macos: apply M0 build fixes`.
-1. **Dependencies** (`arch -x86_64 /usr/local/bin/brew install ...`): `cmake ninja pkg-config sdl3
-   molten-vk vulkan-loader vulkan-headers glslang fmt boost xxhash robin-map vulkan-memory-allocator
-   zydis xbyak magic_enum miniz ffmpeg spirv-headers spirv-cross`. Record any formula that is missing or
-   arm64-only; build those from source into `/usr/local` (same prefix).
-   Check `pkg-config --exists vulkan sdl3` from an x86_64 shell.
+1. **Dependencies**: write `scripts/macos/build-deps.sh` (idempotent; skip a library whose
+   `$BB_DEPS/lib/pkgconfig/*.pc` or CMake config already exists). For each library: pinned release tag,
+   download to `$BB_DEPS/src`, configure with `-DCMAKE_OSX_ARCHITECTURES=x86_64
+   -DCMAKE_OSX_DEPLOYMENT_TARGET=15.4 -DCMAKE_INSTALL_PREFIX=$BB_DEPS` (CMake projects) or
+   `CFLAGS/LDFLAGS="-arch x86_64"`, `--arch=x86_64 --enable-cross-compile` (FFmpeg). Libraries:
+   Pin versions to M0's dependency table unless a build fails: SDL3 3.4.18, fmt 9.1, Zydis 4.0 (+ Zycore),
+   xxhash, miniupnpc 2.2.6, FFmpeg 6.1, OpenSSL 3.x (`./Configure darwin64-x86_64-cc shared`).
+   - zlib: use the macOS SDK's (universal), do not build.
+   - protobuf **v21.12** (3.21 line; newer requires abseil). `protoc` must also be built — x86_64 is fine,
+     it runs under Rosetta during the build.
+   - FFmpeg: only avformat, avcodec, avutil, swscale, swresample; `--disable-programs --disable-doc
+     --disable-network --enable-shared`; enable only the decoders the game needs if you can identify them
+     (`runtime_ajm.c`, `gpu/shim` video decode), otherwise defaults.
+   - Header-only: Boost >= 1.83 (headers only, `Boost::headers` is all that is used), tsl-robin-map, VMA 3.0.1, nlohmann_json
+     → installed with their CMake config files into `$BB_DEPS`.
+   Vulkan loader/MoltenVK/glslang come from the LunarG SDK, not this script.
+   After the script: `lipo -archs` (or `file`) on every `$BB_DEPS/lib/*.dylib` and `*.a` reports x86_64.
+   Record tag + configure line per library in Result.
 2. **`build.sh`**: add a `Darwin)` case before the generic Linux path, or make the Linux path work on
    Darwin with minimal edits:
    - `CC=clang` (Apple clang); drop `-no-pie` → `-Wl,-no_pie -Wl,-pagezero_size,0x1000` (see M2 for why).
@@ -58,11 +73,11 @@ backend stubbed so the binary starts and fails with a clear "no cocoa yet" messa
 - Result lists every stub introduced (file:function) so M2/M3 know what to replace.
 
 ## Hazards
-- Mixing arm64 brew libs: link errors like "building for macOS-arm64 but attempting to link with
-  file built for macOS-x86_64". Check `file /usr/local/lib/libSDL3.dylib`.
-- `boost` and `fmt` from brew may be newer than upstream expects; prefer fixing warnings over pinning.
+- Mixing arm64 brew libs (pkg-config falling back to `/opt/homebrew/lib/pkgconfig` when `PKG_CONFIG_LIBDIR` is unset): link errors like "building for macOS-arm64 but attempting to link with
+  file built for macOS-x86_64". Check `file $BB_DEPS/lib/libSDL3.dylib`.
+- `fmt` / `boost` versions: start with what Ubuntu 24.04 had in M0 (dependency table) to avoid API drift.
 - shadPS4's own tree has a working APPLE CMake path — copy decisions from there rather than inventing.
 
 ## Result
-_(fill in: date, commit, brew packages used (with versions), formulas built from source, every stub
+_(fill in: date, commit, Vulkan SDK version, per-library tag + configure line from build-deps.sh, formulas built from source, every stub
 introduced, every Darwin substitution made, link line of bb-probe, open issues)_

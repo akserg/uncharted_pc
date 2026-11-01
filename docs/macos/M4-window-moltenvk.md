@@ -4,8 +4,8 @@
 U1 main menu renders in an SDL3 Cocoa window through MoltenVK.
 
 ## Preconditions
-- M3 done. `brew list molten-vk vulkan-loader` present in `/usr/local` (x86_64).
-- `VK_ICD_FILENAMES=/usr/local/share/vulkan/icd.d/MoltenVK_icd.json` (or the loader finds it).
+- M3 done. LunarG Vulkan SDK (universal) installed; `$VULKAN_SDK/lib/libMoltenVK.dylib` lists x86_64.
+- `VK_ICD_FILENAMES=$VULKAN_SDK/share/vulkan/icd.d/MoltenVK_icd.json` (or the loader finds it).
   `vulkaninfo` (x86_64) lists the Apple GPU.
 
 ## Tasks
@@ -35,7 +35,7 @@ U1 main menu renders in an SDL3 Cocoa window through MoltenVK.
 
 ## Hazards
 - MoltenVK advertises Vulkan 1.2/1.3 depending on version; if `VK_API_VERSION_1_3` device creation
-  fails, check `brew info molten-vk` version and whether `vk13_features` are queried as optional.
+  fails, check the MoltenVK version shipped in the Vulkan SDK and whether `vk13_features` are queried as optional.
 - Timeline semaphores, `VK_KHR_dynamic_rendering`, descriptor indexing: supported by recent MoltenVK
   but check `vulkaninfo` for each the renderer requires.
 - 64-wide compute shaders that assume `gl_SubgroupSize == 64` will produce garbage, not errors.

@@ -43,8 +43,15 @@ Milestones are sequential. Do not start M(n+1) until M(n)'s **Result** section i
   next to the existing `_WIN32` / Linux ones; do not restructure upstream code (rebase cost).
 - Commit per milestone (or per logical step inside one). Commit messages start with `macos:`.
 - Keep `main` identical to `upstream/main`; rebase `macos` onto it periodically.
-- Toolchain: Apple clang via Xcode CLT, x86_64 Homebrew at `/usr/local` (`arch -x86_64 brew`).
-  Never mix arm64 Homebrew (`/opt/homebrew`) libraries into this build.
+- Toolchain: Apple clang via Xcode CLT targeting `-arch x86_64`. **No x86_64 Homebrew**: Homebrew 7.0
+  (2026) dropped x86_64 installs on Apple Silicon. Libraries come from:
+  - LunarG Vulkan SDK for macOS (universal binaries): Vulkan loader, MoltenVK, glslang, spirv-cross.
+  - `scripts/macos/build-deps.sh`: builds SDL3, fmt, xxhash, Zydis, FFmpeg, protobuf 21.x, miniupnpc
+    as x86_64 into `$BB_DEPS` (default `$HOME/.local/uncharted-x86_64`); header-only deps (Boost,
+    robin-map, VMA) are copied there too.
+  - Build *tools* (cmake, ninja, pkg-config, nasm, git) may come from arm64 Homebrew — they run on
+    the host and are never linked. Libraries from `/opt/homebrew` must never be linked: set
+    `PKG_CONFIG_LIBDIR=$BB_DEPS/lib/pkgconfig` (LIBDIR, not PATH) and `CMAKE_PREFIX_PATH=$BB_DEPS`.
 - Build output stays in `out/` like upstream. Scripts: `build.sh` gets a `Darwin)` case; do not fork it.
 
 ## Reference material
