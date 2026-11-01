@@ -455,6 +455,10 @@ void cpu_patch_image(unsigned char *base, uint64_t size, const uint64_t (*ranges
     need=mode && !strcmp(mode,"all") ? NEED_BMI1|NEED_LZCNT|NEED_MOVBE : missing;
     if (mode && !strcmp(mode,"all")) printf("CPU: BB_CPU_PATCH=all: rewriting BMI1, LZCNT and MOVBE instructions\n");
     report_unsupported();
+#ifdef __APPLE__
+    printf("CPU: cpu_patch %s (host cpuid lacks:%s%s%s)\n",need ? "rewrites guest instructions" : "has nothing to rewrite",
+           need&NEED_BMI1 ? " BMI1" : "",need&NEED_LZCNT ? " LZCNT" : "",need&NEED_MOVBE ? " MOVBE" : "");
+#endif
     image=base; image_size=size;
     ZydisDecoderInit(&decoder,ZYDIS_MACHINE_MODE_LONG_64,ZYDIS_STACK_WIDTH_64);
     if (!need) return;

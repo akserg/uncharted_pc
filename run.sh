@@ -28,6 +28,11 @@ fi
 
 mkdir -p "$OUT" "$USER_DIR"
 
+if [ "$(uname -s)" = Darwin ]; then
+    # macOS: bb-probe is an x86_64 binary under Rosetta 2; without this cpuid hides AVX and bb-probe stops
+    # (Rosetta translates the instructions regardless; docs/macos/M2-memory.md).
+    export ROSETTA_ADVERTISE_AVX=1
+fi
 export PYTHONUTF8=1
 export PYTHONIOENCODING=utf-8
 export BB_CONFIG="${BB_CONFIG:-$PORT/bbport.ini}"

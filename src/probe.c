@@ -185,10 +185,22 @@ static ABI void guest_exit(void) { puts("Runtime: process finalizer callback rea
  * Exit code 24 with a message instead; BB_SKIP_CPU_CHECK=1 starts anyway. BMI1, LZCNT and MOVBE
  * are rewritten before the game starts (cpu_patch.c) unless BB_CPU_PATCH=0. */
 static void check_cpu(void) {
-    if (getenv("BB_SKIP_CPU_CHECK")) return;
     unsigned a=0, b=0, c=0, d=0, basic=0, leaf7=0, extended=0;
     if (__get_cpuid(1,&a,&b,&c,&d)) basic=c;
     if (__get_cpuid_max(0,NULL)>=7) { __cpuid_count(7,0,a,b,c,d); leaf7=b; }    if (__get_cpuid(0x80000001,&a,&b,&c,&d)) extended=c;
+#ifdef __APPLE__
+    /* What Rosetta's cpuid reports (it hides AVX and the BMI/LZCNT/MOVBE bits unless ROSETTA_ADVERTISE_AVX=1,
+     * although it translates the instructions either way: M2). cpu_patch.c rewrites what is missing here. */
+    {
+        unsigned long long xcr0=0;
+        if ((basic>>27)&1) { unsigned low, high; __asm__ volatile("xgetbv" : "=a"(low), "=d"(high) : "c"(0)); xcr0=(unsigned long long)high<<32|low; }
+        printf("CPU: cpuid avx=%u avx2=%u fma=%u bmi1=%u bmi2=%u lzcnt=%u movbe=%u popcnt=%u sse4.2=%u osxsave=%u xcr0=%#llx"
+               " (ROSETTA_ADVERTISE_AVX=%s)\n",(basic>>28)&1,(leaf7>>5)&1,(basic>>12)&1,(leaf7>>3)&1,(leaf7>>8)&1,
+               (extended>>5)&1,(basic>>22)&1,(basic>>23)&1,(basic>>20)&1,(basic>>27)&1,xcr0,
+               getenv("ROSETTA_ADVERTISE_AVX") ? getenv("ROSETTA_ADVERTISE_AVX") : "(unset)");
+    }
+#endif
+    if (getenv("BB_SKIP_CPU_CHECK")) return;
     int avx=0;
     if (((basic>>27)&1) && ((basic>>28)&1)) { /* OSXSAVE and AVX: the OS also has to save YMM state */
         unsigned low, high;
