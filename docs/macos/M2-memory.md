@@ -165,3 +165,24 @@ Physical footprint 79.4 MB with 64 MiB image written and 8 MiB of the pool touch
 6. `bb-probe` was not run on a guest (no `boot.bin`): `runtime_image_map` is exercised only by the test. `ROSETTA_ADVERTISE_AVX=1 out/bb-probe` still prints the usage line (precondition 3 passed).
 7. Verified: `memory-darwin-test`, `runtime-test`, `sema-test` and `cpu-patch-test` also pass **without** `ROSETTA_ADVERTISE_AVX=1` (only `bb-probe`'s `check_cpu()` needs it). `bash build.sh --test` as a whole was run with it, as required.
 8. `ld: warning: -no_pie is deprecated` remains (works).
+
+### Review (Opus 5.5, 2026-11-01)
+
+Accepted. Excellent measurements; the address-space facts are now the reference for later milestones.
+
+Decisions:
+1. **`USER_MIN = 0x7000000000` on Apple: accepted** (the kernel forbids the lower range; same as shadPS4).
+   Missed dependency, fixed in M3: `gpu/shadps4/video_core/buffer_cache/buffer_cache.cpp:684`
+   hard-codes the GPU-heap use window `GpuUseLow = 0x1000000000, GpuUseHigh = 0x1200000000`. On Apple it
+   must be `USER_MIN .. USER_MIN + 0x200000000`. Outside the window `LastGpuUse` returns "now", so the bug
+   would not crash — it would silently disable dead-buffer detection (memory growth). Also grep
+   `gpu/shadps4` (not only `gpu/shim`) for other `0x10'0000'0000`-style constants.
+2. **Low allocator for guest-visible host objects: M3 task.** Required before any guest thread runs.
+3. **File-backed pool: measure in M3, not M5.** macOS writes back dirty pages of shared file mappings
+   on its own schedule, not only under memory pressure; guest GPU memory is rewritten every frame, so this
+   could mean continuous SSD writes. M3 task 1 measures it; switch to `mach_make_memory_entry_64` if it writes.
+4. **`0x400000` image base / zerofill reservation: not now.** Upstream already supports a non-0x400000
+   base below 2 GiB. Adopt shadPS4's link-time `.zerofill` reservations only if `runtime_memory_reserve()`
+   or `runtime_image_map` fails with the real game in M3.
+5. **Fixed-address guest mappings below `USER_MIN`** now return `NO_MEMORY`. M3 logs every such refusal
+   with the requested address and size (one line, `MACOS:` prefix) so a game that depends on it is obvious.
