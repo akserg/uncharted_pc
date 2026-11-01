@@ -23,6 +23,10 @@
 #include <fcntl.h>
 #include <sys/mman.h>
 #include <unistd.h>
+#ifdef __APPLE__
+#include <mach/mach.h>
+#include <mach/mach_vm.h>
+#endif
 #endif
 /* sceKernelGetDirectMemorySize on retail PS4: 5056 MiB. BB_DMEM_MB raises it (the resolution
  * patches above 1080p need about 4 GiB more; run.sh sets it). */
@@ -39,7 +43,16 @@ static uint64_t pool_size_bytes(void) {
 #define POOL_SIZE pool_size_bytes()
 #define FLEXIBLE_SIZE (UINT64_C(448) * 1024 * 1024)
 #define PAGE UINT64_C(16384)
+#ifdef __APPLE__
+/* Rosetta x86_64 process: [0x1000000000, 0x7000000000) is reserved by the system (GPU carveout; every
+ * mmap there fails with EACCES, measured in M2) and [0xFC0000000, 0x1000000000) is the commpage.
+ * shadPS4 makes the same cut for macOS x86_64 (USER_MIN 0x7000000000). */
+#define USER_MIN UINT64_C(0x7000000000)
+#define LOW_MAX UINT64_C(0xfc0000000)
+#else
 #define USER_MIN UINT64_C(0x1000000000)
+#define LOW_MAX USER_MIN
+#endif
 #define USER_MAX UINT64_C(0xfc00000000)
 #define LIMIT 4096
 #define INVALID ((int32_t)UINT32_C(0x80020016))
@@ -309,23 +322,90 @@ static int pool(void) {
     backing_base=MapViewOfFile3(section,GetCurrentProcess(),NULL,0,bytes,0,PAGE_READWRITE,NULL,0);
     return backing_base ? 0 : -1;
 }
+#elif defined(__APPLE__)
+/* ---- host mappings (macOS, x86_64 under Rosetta 2) ----
+ * Backing: an unlinked sparse file in $TMPDIR (APFS) instead of memfd; every guest mapping is a
+ * MAP_SHARED|MAP_FIXED view of it at the physical offset, so aliasing works as on Linux, and
+ * discard is fcntl(F_PUNCHHOLE) (pages mapped elsewhere read zero afterwards, tested in M2).
+ * The PS4 user range [USER_MIN,USER_MAX) is reserved up front as one PROT_NONE anonymous mapping
+ * (runtime_memory_reserve); every later MAP_FIXED lands inside that reservation and so replaces only
+ * our own pages, never a Rosetta/dyld/system mapping. Unmapping puts PROT_NONE anonymous memory back
+ * (the range stays ours). Addresses outside the reservation are refused. */
+static int in_user_range(uintptr_t address, uint64_t size) {
+    return address>=USER_MIN && address<=USER_MAX && size<=USER_MAX-address;
+}
+static int reserved_user_range;
+static void reserve_failed(void *got) {
+    fprintf(stderr,"STOP: cannot reserve the PS4 address range [%#" PRIx64 ", %#" PRIx64 ") (mmap returned %p)\n",USER_MIN,USER_MAX,got);
+    int listed=0;
+    for (mach_vm_address_t at=USER_MIN; at<USER_MAX && listed<8;) {
+        mach_vm_size_t size=0; vm_region_basic_info_data_64_t info; mach_msg_type_number_t count=VM_REGION_BASIC_INFO_COUNT_64; mach_port_t object;
+        mach_vm_address_t start=at;
+        if (mach_vm_region(mach_task_self(),&start,&size,VM_REGION_BASIC_INFO_64,(vm_region_info_t)&info,&count,&object)!=KERN_SUCCESS || start>=USER_MAX) break;
+        fprintf(stderr,"  occupied: %#llx-%#llx prot=%d\n",(unsigned long long)start,(unsigned long long)(start+size),info.protection);
+        at=start+size; ++listed;
+    }
+    exit(21);
+}
+/* The guest range is reserved before anything else can be placed there (called from pool() and probe.c).
+ * mmap without MAP_FIXED treats the address as a hint: accepted only if the whole range was free. */
+void runtime_memory_reserve(void) {
+    if (reserved_user_range) return;
+    void *p=mmap((void *)USER_MIN,USER_MAX-USER_MIN,PROT_NONE,MAP_PRIVATE|MAP_ANONYMOUS|MAP_NORESERVE,-1,0);
+    if (p!=(void *)USER_MIN) {
+        if (p!=MAP_FAILED) munmap(p,USER_MAX-USER_MIN);
+        reserve_failed(p);
+    }
+    reserved_user_range=1;
+}
+static int reserve_again(uintptr_t address, uint64_t size) {
+    return mmap((void *)address,size,PROT_NONE,MAP_PRIVATE|MAP_ANONYMOUS|MAP_NORESERVE|MAP_FIXED,-1,0)==MAP_FAILED ? -1 : 0;
+}
+/* Direct memory occupies [0,POOL_SIZE) of the file, flexible memory [POOL_SIZE,+FLEX_SPAN). */
+static int pool(void) {
+    if (pool_fd>=0) return 0;
+    runtime_memory_reserve();
+    const char *dir=getenv("TMPDIR");
+    char path[PATH_MAX];
+    snprintf(path,sizeof(path),"%s/bb-guest-memory.XXXXXX",dir && *dir ? dir : "/tmp");
+    int fd=mkstemp(path);
+    if (fd<0) { perror("Runtime: cannot create the guest memory file"); return -1; }
+    unlink(path);
+    fcntl(fd,F_SETFD,FD_CLOEXEC);
+    const uint64_t bytes=POOL_SIZE+FLEX_SPAN;
+    if (ftruncate(fd,(off_t)bytes)) { perror("Runtime: cannot size the guest memory file"); close(fd); return -1; }
+    /* Host-only view: anywhere the kernel puts it (the hint keeps it above the guest ranges). */
+    void *view=mmap((void *)(USER_MAX+UINT64_C(0x10000000000)),bytes,PROT_READ|PROT_WRITE,MAP_SHARED|MAP_NORESERVE,fd,0);
+    if (view==MAP_FAILED) { perror("Runtime: cannot map the guest memory file"); close(fd); return -1; }
+    pool_fd=fd; backing_base=view;
+    return 0;
+}
+static int host_commit(uint64_t phys, uint64_t size) { (void)phys; (void)size; return 0; }
+static int host_map(uintptr_t address, uint64_t size, int prot, int reserved, uint64_t phys) {
+    if (!in_user_range(address,size)) return -1;
+    if (reserved) return reserve_again(address,size);
+    /* mmap of a shared file with PROT_EXEC fails with EPERM; mprotect adds it afterwards (tested). */
+    if (mmap((void *)address,size,prot & ~PROT_EXEC,MAP_SHARED|MAP_FIXED,pool_fd,(off_t)phys)==MAP_FAILED) return -1;
+    if ((prot & PROT_EXEC) && mprotect((void *)address,size,prot)) { reserve_again(address,size); return -1; }
+    return 0;
+}
+static int host_unmap(uintptr_t address, uint64_t size) { return in_user_range(address,size) ? reserve_again(address,size) : -1; }
+static int host_protect(uintptr_t address, uint64_t size, int prot) { return mprotect((void *)address,size,prot); }
+/* Punched holes read as zero, also through other mappings of the same pages. APFS only; elsewhere write zeros. */
+static void host_discard(uint64_t phys, uint64_t size) {
+    struct fpunchhole hole={0,0,(off_t)phys,(off_t)size};
+    if (fcntl(pool_fd,F_PUNCHHOLE,&hole)) memset(backing_base+phys,0,size);
+}
 #else
 /* Direct memory occupies [0,POOL_SIZE) of the memfd, flexible memory [POOL_SIZE,+FLEX_SPAN). */
 static int pool(void) {
     if (pool_fd>=0) return 0;
-#ifdef __APPLE__
-    /* MACOS-STUB(M2): macOS has no memfd_create; the guest memory pool (one shared backing that every
-     * mapping of a physical range aliases) is not implemented yet. Fails like an exhausted pool. */
-    fputs("Runtime: guest memory pool is not implemented on macOS yet (M2)\n",stderr);
-    return -1;
-#else
     pool_fd=memfd_create("bb-guest-memory", MFD_CLOEXEC);
     if (pool_fd<0 || ftruncate(pool_fd,(off_t)(POOL_SIZE+FLEX_SPAN))) return -1;
     void *view=mmap(NULL,POOL_SIZE+FLEX_SPAN,PROT_READ|PROT_WRITE,MAP_SHARED|MAP_NORESERVE,pool_fd,0);
     if (view==MAP_FAILED) return -1;
     backing_base=view;
     return 0;
-#endif
 }
 void runtime_memory_reserve(void) {}
 static int host_commit(uint64_t phys, uint64_t size) { (void)phys; (void)size; return 0; }
@@ -338,12 +418,7 @@ static int host_map(uintptr_t address, uint64_t size, int prot, int reserved, ui
 static int host_unmap(uintptr_t address, uint64_t size) { return munmap((void *)address,size); }
 static int host_protect(uintptr_t address, uint64_t size, int prot) { return mprotect((void *)address,size,prot); }
 static void host_discard(uint64_t phys, uint64_t size) {
-#ifdef __APPLE__
-    /* MACOS-STUB(M2): no fallocate(PUNCH_HOLE); with no pool (see pool()) there is nothing to discard. */
-    (void)phys; (void)size;
-#else
     fallocate(pool_fd,FALLOC_FL_PUNCH_HOLE|FALLOC_FL_KEEP_SIZE,(off_t)phys,(off_t)size);
-#endif
 }
 #endif
 static void queue_hook(int kind, uintptr_t address, uint64_t size) {
@@ -783,7 +858,7 @@ void *runtime_low_map(size_t size, int prot) {
     return p;
 #else
     void *p=MAP_FAILED;
-    while (low_next+size<=USER_MIN) {
+    while (low_next+size<=LOW_MAX) {
         p=mmap((void *)low_next,size,prot,MAP_PRIVATE|MAP_ANONYMOUS|MAP_FIXED_NOREPLACE,-1,0);
 #ifdef __APPLE__
         if (bb_darwin_hint_missed(p,(void *)low_next,size)) p=MAP_FAILED; /* no NOREPLACE: hint only */

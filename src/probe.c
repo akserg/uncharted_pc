@@ -1191,8 +1191,11 @@ int main(int argc, char **argv) {
     /* Keep host heap objects handed to the guest (thread handles, TLS) in the
        non-PIE brk heap, i.e. below 1 TiB: the guest packs pointers into 40 bits. */
 #ifdef __APPLE__
-    /* MACOS-NOTE(M2): no mallopt on macOS (libmalloc zones). Whether host heap objects stay below
-     * 1 TiB without the non-PIE brk heap is checked in M2. */
+    /* MACOS-STUB(M3): no mallopt on macOS (libmalloc zones), and host heap objects do NOT stay below
+     * 1 TiB: under Rosetta malloc returns 0x6000xxxxxxxx (nano zone) and 0x7f..xxxxxxxx (measured in
+     * M2, docs/macos/M2-memory.md). Thread handles, TLS/TCB blocks and sync-object handles given to the
+     * guest need a low allocator (a malloc zone or an arena carved from runtime_low_map) before the
+     * guest runs. */
 #else
     mallopt(M_ARENA_MAX,1);
     mallopt(M_MMAP_THRESHOLD,32*1024*1024);
@@ -1208,6 +1211,8 @@ int main(int argc, char **argv) {
      * TCB needs one of the 64 TEB TLS slots before DLLs (Vulkan drivers) take them. */
     runtime_memory_reserve();
     runtime_thread_tcb_offset();
+#elif defined(__APPLE__)
+    runtime_memory_reserve(); /* same reason: MoltenVK/Metal/SDL allocate before the guest does */
 #endif
     int cpu_only = 0, strict_imports = 0, list_missing = 0;
     unsigned timeout_seconds = 10;
