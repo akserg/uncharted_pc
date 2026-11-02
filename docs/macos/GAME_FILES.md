@@ -24,6 +24,9 @@ No game files are part of this repository. Use a dump made from your own console
 │       ├── trophy01.trp               U1 trophies (NPWR09798_00)               optional
 │       ├── trophy02.trp               U2 trophies (NPWR09799_00)               optional
 │       └── trophy03.trp               U3 trophies (NPWR09801_00)               optional
+├── shareddata/
+│   └── chunks.txt                     PlayGo chunk list; the game opens /app0/shareddata/chunks.txt
+│                                      at first level load (asserts without it)  REQUIRED
 ├── u1data/build/main/...              U1 assets (.pak, .psarc)                  REQUIRED for U1
 ├── u2data/build/main/...              U2 assets                                 REQUIRED for U2
 └── u3data/build/main/...              U3 assets                                 REQUIRED for U3
@@ -71,6 +74,7 @@ G=/path/to/game
 for f in eboot.bin big2-ps4_Shipping.elf big3-ps4_Shipping.elf sce_module/libc.prx \
          sce_module/libSceFios2.prx sce_sys/param.sfo; do
   [ -f "$G/$f" ] && echo "ok   $f" || echo "MISS $f"; done
+[ -f "$G/shareddata/chunks.txt" ] && echo "ok   shareddata/chunks.txt" || echo "MISS shareddata/chunks.txt"
 for d in u1data u2data u3data; do [ -d "$G/$d/build/main" ] && echo "ok   $d" || echo "MISS $d"; done
 python3 scripts/prepare.py "$G" --out /tmp/bbcheck --exe eboot.bin   # fails clearly if not decrypted
 ```

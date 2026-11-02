@@ -208,3 +208,29 @@ Whichever is chosen, expect further MoltenVK-only failures behind this one (null
 - Sparse buffers: approve a spike on option 1 (non-sparse arenas)? It is the only way to continue M4; expect days, not hours.
 - chunks.txt: is the dump missing `shareddata/`? Keep the workaround?
 - Which Vulkan driver to target if option 1 works: MoltenVK (as planned) or KosmicKrisp (has `robustBufferAccess2` + `nullDescriptor` true, 1.4.363).
+
+### Review (Opus 5.5, 2026-11-02)
+
+Tasks 1–3, 6 accepted; task 9 (M3) accepted. M4 stays open. Good diagnosis; the main-thread deviation
+(CFRunLoop instead of `dispatch_main()`) is correct — `dispatch_main()` does `pthread_exit` on the main thread.
+
+Decisions:
+1. **Sparse buffers: spike approved, in this order** (M4 continuation, "M4b" below):
+   a. First (short): read how **upstream shadPS4** (which runs on macOS/MoltenVK today) structures its
+      buffer cache without sparse residency, and whether this fork's arenas are a bbport addition. If upstream
+      has a non-sparse path that maps cleanly, prefer it (option 3 may be smaller than estimated).
+   b. Otherwise option 1 (non-sparse arenas), behind a capability check (`sparseBinding == false`), so
+      Linux/Windows keep the sparse path byte-for-byte.
+   c. Measure what option 1 costs: process footprint and wired memory (`footprint -p`, `vmmap --summary`)
+      with 1, 2, 3 arenas live. If Metal wires the full 4 GiB per arena, try smaller arena pages
+      (`arena_page_bits` already adapts to the driver limit) before anything else.
+2. **Driver: develop against KosmicKrisp first, keep MoltenVK working.** The renderer upstream asserts on
+   `robustBufferAccess2`/`nullDescriptor`; KosmicKrisp provides them, so null-descriptor bugs won't hide
+   behind relaxed asserts. Pin with `BB_GPU_ID` (no reliance on `std::sort` order). Once a frame renders,
+   run both and pick by correctness, then performance. Packaging choice stays in M6.
+3. **chunks.txt: the dump is incomplete.** The game itself opens `/app0/shareddata/chunks.txt`, so
+   `shareddata/` is part of the package; the owner re-checks the dump. Keep the workaround only as a
+   fallback when the file is absent, with a one-line `MACOS: chunks.txt missing, treating all chunks as
+   installed` warning. GAME_FILES.md updated.
+4. `run.sh`: yes, `tee` the probe output to `user/last_run.log` (Darwin path at least).
+5. psarc extraction: not now; revisit only if a missing-file path blocks the menu.
