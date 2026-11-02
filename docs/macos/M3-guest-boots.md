@@ -167,6 +167,65 @@ Not exercised by the game (they only run once GNM runs / guest code reaches the 
 - Provide a game dump path (`BB_GAME_DIR`) to finish Task 9, or accept M3 as "runtime verified, guest unverified" and carry Task 9 into M4.
 - Keep the TSD-displacement TLS (spec) or move to shadPS4's LDT/FS approach if the real ELFs contain other `gs:` forms.
 
+### Task 9 (done in M4)
+
+Date 2026-11-02, `macos` branch, MacBook Pro M4 Max 48 GB, macOS 26, x86_64 under Rosetta, `ROSETTA_ADVERTISE_AVX=1`, `BB_GAME_DIR=/Users/akserg/Projects/CUSA02344` (TITLE_ID CUSA02344, APP_VER 01.00), `BB_EXE=u1`.
+**Verdict: the guest boots and runs far past its first GNM/VideoOut activity (about 8-9 s of game code: ~40 guest threads incl. FIOS, job workers, GPU interrupt handlers, audio/Ajm, pad, UserService; levels/pak files opened) and then stops on a RENDERER-side assertion (`Failed to get buffer device address`, sparse buffer, see M4 Result). No guest SIGILL, no loader/runtime failure left.** Loader/runtime vs renderer separation is in the "Fixes" table.
+
+**gs-load counts** (`mov rax, gs:[0]` = `65 48 8b 04 25 00 00 00 00`; `link_modules.py` rewrites the games' `fs:[0]` loads to this form and prints `fs->gs patched=N`; `probe.c patch_tcb_loads` rewrites the displacement at load and prints `Guest TCB loads redirected to the pthread TSD slot gs:[2264]: N`):
+| ELF | `link_modules` fs->gs patched | `patch_tcb_loads` at run time | Zydis scan of the linked image: exact patched form |
+|---|---|---|---|
+| `eboot.bin` (U1) | 1953 | **1953** (run, log line above) | 1953 (all in the main ELF; libc.prx 0, libSceFios2.prx 0) |
+| `big2-ps4_Shipping.elf` (U2) | 7924 | not run | 7924 |
+| `big3-ps4_Shipping.elf` (U3) | 9266 | not run | 9266 |
+TSD displacement in this run: key 283, `gs:[2264]` (0x8d8); computed at run time.
+
+**Scan for other `gs:`/`fs:` accesses** (`tools/scan_gs_fs.c` + `tools/scan_gs_fs.py`, Zydis linear sweep over the executable segments of `out/<exe>/boot-linked.bin`): U1 has 6294 other decodes in the main ELF, 399 in libc.prx, 503 in libSceFios2.prx. **All of the main-ELF ones lie at image offset >= 0x76ad91, i.e. after the import stub table that starts at 0x768a20** (U2: stubs 0xde63a0, lowest hit 0xde93b6; U3: stubs 0x139c5a0, lowest hit 0x139ef2f): the sweep walks into relocation/NID tables and ASCII text that live in the same R+X segment (the hits are things like `and gs:[rdi+0x66], ch` = the bytes of a format string). Before the stub table there is **no** unpatched `gs:`/`fs:` instruction in any of the three main ELFs. **Absolute `fs:[disp]`/`gs:[disp]` with a small displacement (the TLS shape): 0 in all three ELFs.** For libc.prx / libSceFios2.prx the hits begin at module +0x82971 and +0x3d22e inside text tables; the sweep cannot tell code from rodata there, and I did not review the remaining 33 + 12 hits whose neighbourhood is not obviously ASCII one by one (they are listed by running the tool). **Not proven for those two modules**, but the runtime ran their code (libc `_init_env`, Fios2 threads, file reads of `.psarc`) without any TLS fault, which is what an unpatched `gs:` form would give. **No unpatched form found, so the LDT/FS fallback (M3 Review item 1) is not needed.**
+
+**Fixes** (in the order of the spec list; "R" = loader/runtime, "G" = renderer/GPU side):
+| # | Failure | Class | Fix (file:function) |
+|---|---|---|---|
+| 1 | `WindowSDL: No available video device` (the original 2026-11-02 failure) | G (host window) | Cocoa main thread, M4 task 1: `src/probe.c main()/probe_main()`, `gpu/shim/bbgpu.cpp bbgpu_init`. **`dispatch_main()` from the spec does not work**, see M4 Result |
+| 2 | `ASSERTION vaddr == (void*)pageAddr` in `AllocateMemory` (memory-area-ps4.cpp:134), `int 0x41` at guest 0x461cd6 | R (macOS-specific: M2 USER_MIN) | The game places its memory areas from a 64-bit cursor global initialised to `0x1000000000` (image+0x955250 in U1), rounds it up to 4 GiB per area and asserts that `sceKernelMapDirectMemory(hint, flags=0)` returned exactly the hint. A Rosetta process cannot map `[0x1000000000, 0x7000000000)` (re-measured today: `mmap` hint ignored, `mach_vm_allocate(FIXED)` = `KERN_NO_SPACE`), the runtime answered `0x7000000000`. `src/probe.c patch_memory_area_base()` (Apple only, signature search: `movabs r64,0xffffffff00000000` with a `mov r,[rip+G]` before it and `mov [rip+G],r` after it, G == `0x1000000000`) writes `BB_USER_MIN` into G. Log: `MACOS: memory area cursor at image+0x955250 moved from 0x1000000000 to 0x7000000000`. Areas then map at 0x7000000000 / 0x7100000000 / 0x7200000000 as asked. **Searched for other users of the constant only by running: none surfaced in 8 s; the other U2/U3 binaries were not run (the signature is compiler-generated, may not match; a missing match prints a WARNING)** |
+| 3 | `ASSERTION chunkSetNameIsValid` in `IsChunkSetEntirelyWithin` (game-loading.cpp:504), `int 0x41` at 0x495388 | R, **not macOS-specific, data** | The dump has no `/app0/shareddata/chunks.txt` (`Runtime: open(/app0/shareddata/chunks.txt) -> not found`; it is not in the dump root, nor in any of bin/core/uiextra/data.psarc: manifests listed). `LoadChunksTxt` tolerates that, `g_ChunkSets` stays empty, and the first level load asserts. The runtime already reports every PlayGo chunk installed (`runtime_services.c`), so `src/probe.c patch_missing_chunks_txt()` (Apple only, only when the file is missing, signature search around the assertion string) turns the assertion path into `mov al,1; jmp epilogue`, i.e. an unknown chunk set counts as installed (the function already returns true for a null name). **Workaround, not a fix: needs an owner decision** (is the dump incomplete? upstream Linux/Windows would hit the same assertion with this dump; I could not check) |
+| 4 | none | R | file I/O (`runtime_file.c`): FIOS opened `bin.psarc`, `core.psarc`, `data.psarc` and many `.pak` files without error; new diagnostic `BB_FILE_TRACE=1` prints every successful guest `open` (`File trace: open(...)`). Many `-> not found` lines remain for files that the game probes optionally (`effect1/*.bin`, `bpdata1/particle.json`, `lut0/default-color-gray.dds`, `movie1/texture.txt`): the psarc archives were NOT extracted (LINUX_BUILD.md "optional but recommended"). Whether they matter is for M5 |
+| 5 | none | R | ELF mapping, relocations (`applied 21330 relocations`), TLS, threads, fibers (a fiber ran: `fiber_main` frames in the first fault trace), time, save data (`SaveWorker` thread created, `user/` populated): no failures |
+
+**Last 30 lines of `user/last_run.log`** (the output of `out/bb-probe` with the `run.sh` environment, saved as `user/last_run.log` by hand, since nothing in the repo writes that file; it is the 8 s run that gets past the first GNM/VideoOut activity and ends in the renderer assertion):
+```
+Runtime: audio port 17 opened (type 4, 1 ch, float, 1024 frames)
+Runtime: Ajm context initialized (ATRAC9 via LibAtrac9)
+Runtime: guest thread 'brbDriver' created (stack=65536, prio=272)
+Runtime: guest thread 'snd_stream_parsing_thread' created (stack=65536, prio=700)
+Runtime: guest thread 'snd_stream_reader_thread' created (stack=65536, prio=700)
+Runtime: UserService initialized (user 1 logged in)
+Runtime: pad opened for user 1 (SDL gamepad or keyboard)
+Runtime: open(/app0/u1data/build/main/lut0/default-color-gray.dds) -> not found
+Runtime: open(/app0/u1data/build/main/effect1/particle.bin) -> not found
+Runtime: open(/app0/u1data/build/main/effect1/particle-ingame.bin) -> not found
+Runtime: open(/app0/u1data/build/main/effect1/texturedict1/chunk-1-tstrm.bin) -> not found
+Runtime: open(/app0/u1data/build/main/effect1/texturedict1/chunk-1-tstrm-1.bin) -> not found
+Runtime: open(/app0/u1data/build/main/movie1/texture.txt) -> not found
+Runtime: UserService initialized (user 1 logged in)
+Runtime: system module 0xa0 loaded (host implementation)
+Runtime: system module 0x2c loaded (host implementation)
+Runtime: system module 0xac loaded (host implementation)
+Runtime: system module 0xb2 loaded (host implementation)
+Runtime: open(/app0/u1data/build/main/effect1/world-0.bin) -> not found
+Runtime: open(/app0/u1data/build/main/effect1/world-0-ingame.bin) -> not found
+Runtime: open(/app0/u1data/build/main/effect1/world-1.bin) -> not found
+Runtime: open(/app0/u1data/build/main/effect1/world-1-ingame.bin) -> not found
+Runtime: SystemService: splash screen hidden
+Runtime: open(/app0/u1data/build/main/effect1/proto.bin) -> not found
+Runtime: guest thread 'SaveWorker' created (stack=65536, prio=700)
+Runtime: open(/app0/u1data/build/main/bpdata1/particle.json) -> not found
+GPU [Debug] <Critical> buffer.cpp:214 Create: Assertion Failed!
+Failed to get buffer device address (size 0x100000000, type 4, flags { SparseBinding | SparseResidency })
+STOP: GPU library assertion failed (see GPU log above)
+exit 23 after 8s
+```
+Task 10 (Xbyak JIT in `flatten_extended_userdata_pass.cpp`, `ms_abi` hooks): still **not verified in the game**. The first frame never rendered, so the shader recompiler did not run; the log shows `Callbacks: no thunk memory` and `Job wait: no thunk memory, not patched` (those game-callback patches did not find thunk memory; not investigated, it may be the normal U1 message).
+
 ### Review (Opus 5.5, 2026-11-01)
 
 Accepted as **runtime verified, guest unverified**. Task 9 (boot to first GNM/VideoOut) moves to M4's
