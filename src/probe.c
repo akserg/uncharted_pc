@@ -14,6 +14,9 @@
 #include <cpuid.h>
 #include "runtime.h"
 #include "gpu/bbgpu.h"
+#ifdef __APPLE__
+#include "gpu/shim/bb_user_range.h"
+#endif
 #ifdef _WIN32
 #include "red_zone.h"
 #endif
@@ -921,6 +924,90 @@ static void install_game_callbacks(Segment *segments, uint64_t ns, uint64_t imag
  * first run, an upscaler starting) and the game stopped right after U1's first cutscene. The
  * assertion's branch is found through its message, in any version of the three games, and the
  * failed check now waits (pause, check again) instead. */
+#ifdef __APPLE__
+/* The game places its memory areas (AllocateMemory in memory-area-ps4.cpp) from a cursor initialised to the PS4 user
+ * base 0x1000000000, rounds it up to 4 GiB after each area and asserts that sceKernelMapDirectMemory returned exactly
+ * the address it asked for. A Rosetta x86_64 process cannot map [0x100000000-ish, 0x7000000000) (M2: the system
+ * reserves it; every fixed map there fails), so the runtime would answer with USER_MIN and the assertion
+ * `vaddr == (void*)pageAddr` fires. The cursor is a 64-bit global: `mov reg,[rip+G]` ... `movabs reg,0xffffffff00000000`
+ * ... `mov [rip+G],reg`, G holding 0x1000000000. It is rewritten to BB_USER_MIN (macOS only; same layout otherwise). */
+static void patch_memory_area_base(uint64_t image_size) {
+    const uint64_t old_base=UINT64_C(0x1000000000);
+    uint64_t done[8]; unsigned ndone=0;
+    for (uint64_t at=0;at+10<=image_size;++at) {
+        /* movabs r64, 0xffffffff00000000: REX.W B8+r, imm64 */
+        if ((image[at]&0xf8)!=0x48 || (image[at+1]&0xf8)!=0xb8) continue;
+        static const unsigned char imm[8]={0,0,0,0,0xff,0xff,0xff,0xff};
+        if (memcmp(image+at+2,imm,8)) continue;
+        uint64_t slot=0;
+        for (uint64_t b=at>0x30 ? at-0x30 : 0;b+7<=at;++b) { /* mov reg,[rip+rel32] */
+            if ((image[b]&0xfb)!=0x48 || image[b+1]!=0x8b || (image[b+2]&0xc7)!=0x05) continue;
+            int32_t rel; memcpy(&rel,image+b+3,4);
+            const int64_t target=(int64_t)b+7+rel;
+            uint64_t value;
+            if (target<0 || (uint64_t)target+8>image_size || target%8) continue;
+            memcpy(&value,image+target,8);
+            if (value==old_base) slot=(uint64_t)target;
+        }
+        if (!slot) continue;
+        int stored=0;
+        for (uint64_t a=at+10;a+7<=at+10+0x30 && a+7<=image_size;++a) { /* mov [rip+rel32],reg */
+            if ((image[a]&0xfb)!=0x48 || image[a+1]!=0x89 || (image[a+2]&0xc7)!=0x05) continue;
+            int32_t rel; memcpy(&rel,image+a+3,4);
+            if ((int64_t)a+7+rel==(int64_t)slot) stored=1;
+        }
+        int seen=0;
+        for (unsigned i=0;i<ndone;++i) seen|=done[i]==slot;
+        if (!stored || seen || ndone==8) continue;
+        const uint64_t value=(uint64_t)BB_USER_MIN;
+        memcpy(image+slot,&value,8);
+        done[ndone++]=slot;
+        printf("MACOS: memory area cursor at image+%#" PRIx64 " moved from %#" PRIx64 " to %#" PRIx64 "\n",slot,old_base,value);
+    }
+    if (!ndone) fputs("WARNING: MACOS: the game's memory area cursor (0x1000000000) was not found; "
+                      "AllocateMemory will assert (see docs/macos/M4-window-moltenvk.md)\n",stderr);
+}
+#endif
+#ifdef __APPLE__
+/* M4 task 9 workaround, NOT macOS-specific: this dump has no /app0/shareddata/chunks.txt (the game's LoadChunksTxt
+ * tolerates the missing file), so g_ChunkSets stays empty and the first level load asserts
+ * `chunkSetNameIsValid` in IsChunkSetEntirelyWithin (game-loading.cpp:504, int 0x41). The runtime reports every
+ * PlayGo chunk installed (runtime_services.c), so an unknown chunk set is answered "within" (true), exactly what
+ * the function returns for a null name: the assertion path (dead code ending in int 0x41) becomes
+ * `mov al,1; jmp epilogue`. Only applied when the file really is missing. */
+static void patch_missing_chunks_txt(const char *app0, uint64_t image_size) {
+    char path[4096];
+    snprintf(path,sizeof(path),"%s/shareddata/chunks.txt",app0 ? app0 : ".");
+    if (!access(path,R_OK)) return;
+    static const char name[]="chunkSetNameIsValid";
+    unsigned char *text=NULL;
+    for (uint64_t i=0;i+sizeof(name)<=image_size;++i)
+        if (image[i]=='c' && !memcmp(image+i,name,sizeof(name))) { text=image+i; break; }
+    if (!text) return;
+    for (uint64_t at=0;at+7<=image_size;++at) {
+        if ((image[at]&0xfb)!=0x48 || image[at+1]!=0x8d || (image[at+2]&0xc7)!=0x05) continue;
+        int32_t rel; memcpy(&rel,image+at+3,4);
+        if (image+at+7+rel!=text) continue;
+        /* test rbx,rbx; jnz +n; <assertion path>: the path starts with `mov rax,[rip+x]` (48 8b 05) */
+        unsigned char *path_start=NULL;
+        for (unsigned char *q=image+at;q>image+at-0x30;--q)
+            if (q[0]==0x48 && q[1]==0x85 && q[2]==0xdb && q[3]==0x75 && q[5]==0x48 && q[6]==0x8b && q[7]==0x05) { path_start=q+5; break; }
+        unsigned char *trap=NULL;
+        for (unsigned char *q=image+at;q<image+at+0x40;++q) if (q[0]==0xcd && q[1]==0x41) { trap=q; break; }
+        if (!path_start || !trap) continue;
+        unsigned char *epilogue=NULL;
+        for (unsigned char *q=trap+2;q<trap+0x40;++q)
+            if (q[0]==0x5b && q[1]==0x41 && q[2]==0x5e && q[3]==0x5d && q[4]==0xc3) { epilogue=q; break; }
+        if (!epilogue || path_start+7>trap+2) continue;
+        const int32_t back=(int32_t)(epilogue-(path_start+2+5));
+        path_start[0]=0xb0; path_start[1]=0x01; path_start[2]=0xe9; memcpy(path_start+3,&back,4);
+        printf("MACOS: %s is missing; unknown chunk sets count as installed (IsChunkSetEntirelyWithin patched at image+%#" PRIx64 ")\n",
+               path,(uint64_t)(path_start-image));
+        return;
+    }
+    fputs("WARNING: MACOS: shareddata/chunks.txt is missing and IsChunkSetEntirelyWithin was not found; level loads will assert\n",stderr);
+}
+#endif
 static void patch_eop_tick_wait(uint64_t image_size) {
     static const char message[]="GetRenderFrameParams(frameToFreeInstancesFor)->m_gfxEopTick";
     unsigned char *text=NULL;
@@ -1522,6 +1609,10 @@ int main(int argc, char **argv) {
         for (uint64_t s=0;s<ns;++s) if (segments[s].address+segments[s].size>image_end) image_end=segments[s].address+segments[s].size;
         install_game_callbacks(segments, ns, image_end);
         patch_eop_tick_wait(image_end);
+#ifdef __APPLE__
+        patch_memory_area_base(image_end);
+        patch_missing_chunks_txt(app0,image_end);
+#endif
         patch_job_sleep(image_end);
         patch_job_lock_wait(image_end);
         runtime_display_patch(image, image_end);

@@ -301,6 +301,7 @@ static int64_t do_open(const char *guest,int flags,int mode) {
     snprintf(files[fd].path,sizeof(files[fd].path),"%s",guest);
     ++opens;
     pthread_mutex_unlock(&lock);
+    if (getenv("BB_FILE_TRACE")) printf("File trace: open(%s) flags=0x%x -> fd %d, %lld bytes%s\n",guest,flags,fd,(long long)s.st_size,dir ? " (directory)" : "");
     if (audio_trace() && strstr(guest,"sound")) printf("Audio trace: open(%s) -> fd %d, %lld bytes\n",guest,fd,(long long)s.st_size);
     const char *mod_trace=getenv("BB_MOD_TRACE"), *mod_root=getenv("BB_MODS_DIR");
     if (mod_trace && mod_trace[0]=='1' && mod_root) {
