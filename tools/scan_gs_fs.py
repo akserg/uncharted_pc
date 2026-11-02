@@ -22,7 +22,8 @@ def main(path, scan):
     mods = []
     for _ in range(r()):
         base, sz = r(), r(); [r() for _ in range(5)]; mods.append((base, sz))
-    p += r() * 24
+    nb = r()
+    p += nb * 24
     segs = [(r(), r(), r()) for _ in range(ns)]
     img = data[-size:]
     stub = re.search(rb'\xff\x25....\x68\x00\x00\x00\x00\xe9', img)
