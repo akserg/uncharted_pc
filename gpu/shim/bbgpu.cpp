@@ -17,12 +17,16 @@
 #include "common/polyfill_thread.h"
 #include "video_core/renderdoc.h"
 #include <cstring>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <chrono>
 #include <thread>
 #include <vector>
 #include <SDL3/SDL.h>
+#ifdef __APPLE__
+#include <dispatch/dispatch.h>
+#endif
 #include "../bbgpu.h"
 #include "bb_user_range.h"
 #include "common/elf_info.h"
@@ -236,6 +240,39 @@ extern "C" int bbgpu_init(const BbGpuConfig* config) {
             height = h;
         }
     }
+#ifdef __APPLE__
+    // Cocoa: windows and event pumping only on the process main thread, which probe.c leaves in
+    // dispatch_main(). The window is created by a block on the main queue; the event pump re-posts itself
+    // every 2 ms instead of looping, so other work routed to the main queue (dispatch_async_f) still runs.
+    struct WindowStart {
+        std::string title;
+        s32 width, height;
+    };
+    static void (*tick)(void*);
+    tick = [](void* context) {
+        auto* window = static_cast<Frontend::WindowSDL*>(context);
+        if (window->PollEvents()) {
+            dispatch_after_f(dispatch_time(DISPATCH_TIME_NOW, 2 * NSEC_PER_MSEC), dispatch_get_main_queue(),
+                             window, tick);
+            return;
+        }
+        std::printf("Window closed (close button, Alt+F4 or system quit request)\n");
+        std::fflush(stdout);
+        Vulkan::FlushPipelineCacheForExit();
+        std::_Exit(0);
+    };
+    dispatch_async_f(dispatch_get_main_queue(), new WindowStart{title, width, height}, [](void* context) {
+        std::unique_ptr<WindowStart> start{static_cast<WindowStart*>(context)};
+        auto* window = new Frontend::WindowSDL(start->width, start->height, start->title.c_str());
+        {
+            std::scoped_lock lock{g_window_mutex};
+            g_window = window;
+            g_window_ready = true;
+        }
+        g_window_cv.notify_all();
+        tick(window);
+    });
+#else
     g_window_thread = std::thread([title, width, height] {
         Common::SetCurrentThreadName("bb:window");
         auto* window = new Frontend::WindowSDL(width, height, title.c_str());
@@ -254,6 +291,7 @@ extern "C" int bbgpu_init(const BbGpuConfig* config) {
         std::_Exit(0);
     });
     g_window_thread.detach();
+#endif
     {
         std::unique_lock lock{g_window_mutex};
         g_window_cv.wait(lock, [] { return g_window_ready; });

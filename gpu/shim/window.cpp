@@ -4,6 +4,9 @@
 #include <cstring>
 #include <string>
 #include <SDL3/SDL.h>
+#ifdef __APPLE__
+#include <pthread.h>
+#endif
 #include "common/assert.h"
 #include "common/logging/log.h"
 #include "sdl_window.h"
@@ -93,6 +96,10 @@ WindowSDL::WindowSDL(s32 width_, s32 height_, const char* title) : width{width_}
     if (!SDL_InitSubSystem(SDL_INIT_VIDEO | SDL_INIT_GAMEPAD)) {
         UNREACHABLE_MSG("Failed to initialize SDL video: {}", SDL_GetError());
     }
+#ifdef __APPLE__
+    LOG_INFO(Frontend, "WindowSDL: SDL_IsMainThread() = {}", SDL_IsMainThread());
+    std::printf("WindowSDL: SDL_IsMainThread() = %d, pthread_main_np() = %d\n", SDL_IsMainThread() ? 1 : 0, pthread_main_np());
+#endif
     SDL_PropertiesID props = SDL_CreateProperties();
     SDL_SetStringProperty(props, SDL_PROP_WINDOW_CREATE_TITLE_STRING, title);
     SDL_SetNumberProperty(props, SDL_PROP_WINDOW_CREATE_X_NUMBER, SDL_WINDOWPOS_CENTERED);

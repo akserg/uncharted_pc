@@ -123,6 +123,7 @@ if [[ $(uname -s) == Darwin ]]; then
     cc=("$CC" "${arch_flags[@]}")
     includes=(-I"$BB_DEPS/include" "${includes[@]}")
     libraries+=(-Wl,-rpath,"$VULKAN_SDK/lib") # @rpath/libvulkan.1.dylib for the test binaries too
+    libraries+=(-framework CoreFoundation) # probe.c main(): CFRunLoop on the main thread (Cocoa)
 fi
 runtime=(src/runtime*.c)
 # Third-party decoders: compiled once, without this project's -Werror policy.

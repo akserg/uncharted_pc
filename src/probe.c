@@ -27,6 +27,10 @@
 #include <sys/mman.h>
 #ifndef __APPLE__
 #include <malloc.h>
+#else
+#include <CoreFoundation/CoreFoundation.h>
+#include <dispatch/dispatch.h>
+#include <pthread.h>
 #endif
 #include <unistd.h>
 #include <signal.h>
@@ -1219,7 +1223,39 @@ void runtime_restart(void) {
 #endif
 }
 
+#ifdef __APPLE__
+/* Cocoa allows windows and event pumping only on the process main thread (SDL: "No available video device"
+ * otherwise). The process main thread therefore only runs the GCD main queue (bbgpu.cpp posts the SDL window
+ * loop there); everything else - loader, signals, runtime_memory_reserve, set_gs, enter_on_stack - runs on the
+ * pthread "bb:main" below, so per-thread state (TSD key for the guest TCB, signal masks) lives on one thread. */
+static int probe_main(int argc, char **argv);
+static struct { int argc; char **argv; } probe_args;
+static void probe_keep_alive(CFRunLoopTimerRef timer, void *info) { (void)timer; (void)info; }
+static void *probe_thread(void *arg) {
+    (void)arg;
+    pthread_setname_np("bb:main");
+    exit(probe_main(probe_args.argc, probe_args.argv)); /* exit() from any thread, as the main() return did */
+    return NULL;
+}
 int main(int argc, char **argv) {
+    probe_args.argc = argc; probe_args.argv = argv;
+    pthread_attr_t attr; pthread_t thread;
+    pthread_attr_init(&attr);
+    pthread_attr_setstacksize(&attr, 64u << 20); /* spec: >= 16 MiB; the process main thread had 8 MiB */
+    if (pthread_create(&thread, &attr, probe_thread, NULL)) { fputs("ERROR: cannot start bb:main\n", stderr); return 1; }
+    /* NOT dispatch_main(): it ends the main thread (pthread_exit) and a GCD worker drains the main queue, so
+     * blocks run with pthread_main_np()==0 and Cocoa refuses ("NSWindow should only be instantiated on the main
+     * thread", measured in M4). The main CFRunLoop drains the main queue on the real main thread. A far-future
+     * timer keeps CFRunLoopRunInMode from returning while the queue is still empty. */
+    CFRunLoopTimerRef keep_alive = CFRunLoopTimerCreate(NULL, CFAbsoluteTimeGetCurrent() + 1e9, 1e9, 0, 0, probe_keep_alive, NULL);
+    CFRunLoopAddTimer(CFRunLoopGetMain(), keep_alive, kCFRunLoopCommonModes);
+    CFRunLoopRun(); /* never returns: the process ends through exit()/_exit() on another thread */
+    return 0;
+}
+static int probe_main(int argc, char **argv) {
+#else
+int main(int argc, char **argv) {
+#endif
     setvbuf(stdout, NULL, _IONBF, 0);
 #ifndef _WIN32
     /* Keep host heap objects handed to the guest (thread handles, TLS) in the
@@ -1580,4 +1616,7 @@ int main(int argc, char **argv) {
     enter_on_stack(image+entry,&params,(void *)guest_exit,stack+MAIN_STACK-64);
 #endif
     fail("entry unexpectedly returned");
+#ifdef __APPLE__
+    return 1; /* probe_main is not main(): no implicit return */
+#endif
 }
