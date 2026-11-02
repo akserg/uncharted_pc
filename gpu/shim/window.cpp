@@ -5,6 +5,7 @@
 #include <string>
 #include <SDL3/SDL.h>
 #ifdef __APPLE__
+#include <SDL3/SDL_metal.h>
 #include <pthread.h>
 #endif
 #include "common/assert.h"
@@ -107,7 +108,13 @@ WindowSDL::WindowSDL(s32 width_, s32 height_, const char* title) : width{width_}
     SDL_SetNumberProperty(props, SDL_PROP_WINDOW_CREATE_WIDTH_NUMBER, width_);
     SDL_SetNumberProperty(props, SDL_PROP_WINDOW_CREATE_HEIGHT_NUMBER, height_);
     SDL_SetBooleanProperty(props, SDL_PROP_WINDOW_CREATE_RESIZABLE_BOOLEAN, true);
+#ifdef __APPLE__
+    // Cocoa: the Vulkan surface is a CAMetalLayer (SDL_Metal_CreateView), not SDL's own Vulkan surface helper.
+    SDL_SetBooleanProperty(props, SDL_PROP_WINDOW_CREATE_METAL_BOOLEAN, true);
+    SDL_SetBooleanProperty(props, SDL_PROP_WINDOW_CREATE_HIGH_PIXEL_DENSITY_BOOLEAN, true);
+#else
     SDL_SetBooleanProperty(props, SDL_PROP_WINDOW_CREATE_VULKAN_BOOLEAN, true);
+#endif
     const char* fullscreen = std::getenv("BB_FULLSCREEN");
     SDL_SetBooleanProperty(props, SDL_PROP_WINDOW_CREATE_FULLSCREEN_BOOLEAN, fullscreen && fullscreen[0] == '1');
     base_title = title;
@@ -126,12 +133,16 @@ WindowSDL::WindowSDL(s32 width_, s32 height_, const char* title) : width{width_}
 #endif
 #ifdef __APPLE__
     if (driver && !std::strcmp(driver, "cocoa")) {
-        // MACOS-STUB(M4): the Metal surface is wired in M4. It will be
-        // window_info.type = WindowSystemType::Metal and render_surface = SDL_Metal_GetLayer(
-        // SDL_Metal_CreateView(window)) (SDL3). Until then the window cannot present: stop with a clear message.
-        LOG_ERROR(Frontend, "macOS: the Cocoa/Metal window surface is not implemented yet (milestone M4)");
-        std::fputs("STOP: macOS Cocoa/Metal window surface is not implemented yet (milestone M4)\n", stderr);
-        std::abort();
+        // SDL3: SDL_Metal_CreateView adds a CAMetalLayer-backed view to the window (needs SDL_WINDOW_METAL, set
+        // at creation); vk_platform.cpp makes the VkSurface from the layer (VK_EXT_metal_surface). The view stays
+        // alive as long as the window: it is destroyed with it.
+        SDL_MetalView view = SDL_Metal_CreateView(window);
+        ASSERT_MSG(view, "SDL_Metal_CreateView failed: {}", SDL_GetError());
+        void* layer = SDL_Metal_GetLayer(view);
+        ASSERT_MSG(layer, "SDL_Metal_GetLayer failed: {}", SDL_GetError());
+        window_info.type = WindowSystemType::Metal;
+        window_info.render_surface = layer;
+        window_info.render_surface_scale = SDL_GetWindowPixelDensity(window);
     } else
 #endif
     if (driver && !std::strcmp(driver, "x11")) {

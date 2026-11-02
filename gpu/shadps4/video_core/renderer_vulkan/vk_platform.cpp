@@ -205,6 +205,12 @@ std::vector<const char*> GetInstanceExtensions(Frontend::WindowSystemType window
         extensions.push_back(VK_EXT_SWAPCHAIN_COLOR_SPACE_EXTENSION_NAME);
     }
 
+#ifdef __APPLE__
+    // MoltenVK is a portability driver: the loader hides it unless the instance asks to enumerate
+    // portability drivers (shadPS4 upstream: same extension + eEnumeratePortabilityKHR below).
+    extensions.push_back(VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME);
+#endif
+
     if (enable_debug_utils) {
         extensions.push_back(VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
     }
@@ -266,13 +272,18 @@ vk::UniqueInstance CreateInstance(Frontend::WindowSystemType window_type, bool e
 #if defined(__APPLE__)
     // Initialize the environment with the path to the included ICD, so that the loader will
     // find it.
+    // bbport: only when an ICD manifest really sits next to the executable (a packaged app, M6) and the
+    // user has not chosen one: out/ has none, and overriding the search path there hides MoltenVK.
     static const auto icd_path = [] {
         char path[PATH_MAX];
         u32 length = PATH_MAX;
         _NSGetExecutablePath(path, &length);
         return std::filesystem::path(path).parent_path();
     }();
-    setenv("VK_DRIVER_FILES", icd_path.c_str(), true);
+    if (!std::getenv("VK_DRIVER_FILES") && !std::getenv("VK_ICD_FILENAMES") &&
+        std::filesystem::exists(icd_path / "MoltenVK_icd.json")) {
+        setenv("VK_DRIVER_FILES", icd_path.c_str(), true);
+    }
 #endif
 
     static vk::detail::DynamicLoader dl;
@@ -414,6 +425,9 @@ vk::UniqueInstance CreateInstance(Frontend::WindowSystemType window_type, bool e
 
     vk::StructureChain<vk::InstanceCreateInfo, vk::LayerSettingsCreateInfoEXT> instance_ci_chain = {
         vk::InstanceCreateInfo{
+#ifdef __APPLE__
+            .flags = vk::InstanceCreateFlagBits::eEnumeratePortabilityKHR,
+#endif
             .pApplicationInfo = &application_info,
             .enabledLayerCount = static_cast<u32>(layers.size()),
             .ppEnabledLayerNames = layers.data(),

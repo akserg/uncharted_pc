@@ -276,13 +276,31 @@ bool Instance::CreateDevice() {
     ASSERT_MSG(add_extension(VK_EXT_ROBUSTNESS_2_EXTENSION_NAME),
                "Required Vulkan extension unavailable: {}", VK_EXT_ROBUSTNESS_2_EXTENSION_NAME);
 
+#ifdef __APPLE__
+    // Portability drivers (MoltenVK) require VK_KHR_portability_subset to be enabled when the device lists it
+    // (same as shadPS4 upstream's APPLE branch).
+    add_extension(VK_KHR_PORTABILITY_SUBSET_EXTENSION_NAME);
+#endif
+
     const auto robustness2_features = feature_chain.get<vk::PhysicalDeviceRobustness2FeaturesEXT>();
+#ifdef __APPLE__
+    // bbport (macOS): MoltenVK 1.4.x reports robustBufferAccess2=false and nullDescriptor=false (robustImageAccess2
+    // is true). Upstream asserts all three; here the gaps are logged and the device is created with only what the
+    // driver has (the renderer's null-descriptor uses are covered in M4 Result).
+    const bool robust_buffer_access2 = robustness2_features.robustBufferAccess2;
+    const bool robust_image_access2 = robustness2_features.robustImageAccess2;
+    const bool null_descriptor_supported = robustness2_features.nullDescriptor;
+    LOG_WARNING(Render_Vulkan, "robustness2: robustBufferAccess2={} robustImageAccess2={} nullDescriptor={}",
+                robust_buffer_access2, robust_image_access2, null_descriptor_supported);
+#else
     ASSERT_MSG(robustness2_features.robustBufferAccess2,
                "Required Vulkan feature unavailable: robustBufferAccess2");
     ASSERT_MSG(robustness2_features.robustImageAccess2,
                "Required Vulkan feature unavailable: robustImageAccess2");
     ASSERT_MSG(robustness2_features.nullDescriptor,
                "Required Vulkan feature unavailable: nullDescriptor");
+    constexpr bool robust_buffer_access2 = true, robust_image_access2 = true, null_descriptor_supported = true;
+#endif
 
     // Optional
     maintenance_5 = add_extension(VK_KHR_MAINTENANCE_5_EXTENSION_NAME);
@@ -575,9 +593,9 @@ bool Instance::CreateDevice() {
             .depthClipEnable = true,
         },
         vk::PhysicalDeviceRobustness2FeaturesEXT{
-            .robustBufferAccess2 = true,
-            .robustImageAccess2 = true,
-            .nullDescriptor = true,
+            .robustBufferAccess2 = robust_buffer_access2,
+            .robustImageAccess2 = robust_image_access2,
+            .nullDescriptor = null_descriptor_supported,
         },
         vk::PhysicalDeviceVertexInputDynamicStateFeaturesEXT{
             .vertexInputDynamicState = true,

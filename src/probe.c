@@ -1249,8 +1249,12 @@ int main(int argc, char **argv) {
      * timer keeps CFRunLoopRunInMode from returning while the queue is still empty. */
     CFRunLoopTimerRef keep_alive = CFRunLoopTimerCreate(NULL, CFAbsoluteTimeGetCurrent() + 1e9, 1e9, 0, 0, probe_keep_alive, NULL);
     CFRunLoopAddTimer(CFRunLoopGetMain(), keep_alive, kCFRunLoopCommonModes);
-    CFRunLoopRun(); /* never returns: the process ends through exit()/_exit() on another thread */
-    return 0;
+    /* Never leave: returning from main() would exit(0) the whole process. Something in AppKit/SDL/MoltenVK stops the
+     * main run loop once the window exists (measured: CFRunLoopRun() returned after bbgpu_init), so run it in a loop. */
+    for (;;) {
+        SInt32 why = CFRunLoopRunInMode(kCFRunLoopDefaultMode, 1e9, false);
+        if (getenv("BB_RUNLOOP_LOG")) fprintf(stderr, "main run loop returned (%d), running it again\n", (int)why);
+    }
 }
 static int probe_main(int argc, char **argv) {
 #else
