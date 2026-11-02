@@ -56,8 +56,15 @@ inline constexpr int OutputHeights[] = {720, 1080, 1440, 2160};
 inline constexpr int OutputCount = 4;
 inline constexpr int OutputDefault = 1; ///< 1920x1080, the game's own size
 
+#ifdef __APPLE__
+/// macOS (M4): FSR 4 is forced off at run time and FSR 3.1 is not validated on MoltenVK, so the default is off.
+inline constexpr int DefaultUpscaler = UpscalerOff;
+#else
+inline constexpr int DefaultUpscaler = UpscalerFsr3;
+#endif
+
 struct Values {
-    std::atomic<int> upscaler{UpscalerFsr3};
+    std::atomic<int> upscaler{DefaultUpscaler};
     std::atomic<int> preset{NativeAA};
     std::atomic<bool> sharpen{true};
     std::atomic<float> sharpness{0.3f};
@@ -98,7 +105,7 @@ struct Values {
 
     /// Startup settings for the explicit BB_RENDER_RES compatibility patch only.
     int startup_preset = NativeAA;
-    int startup_upscaler = UpscalerFsr3;
+    int startup_upscaler = DefaultUpscaler;
     bool startup_object_motion = true;
     bool startup_effects[EffectCount]{};
     int startup_model_lod = 0;

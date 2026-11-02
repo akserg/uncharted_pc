@@ -210,7 +210,8 @@ void UniqueBuffer::Create(vk::BufferCreateInfo& buffer_ci, MemoryType mem_type,
             .buffer = buffer,
         };
         auto bda_result = device.getBufferAddress(bda_info);
-        ASSERT_MSG(bda_result != 0, "Failed to get buffer device address");
+        ASSERT_MSG(bda_result != 0, "Failed to get buffer device address (size {:#x}, type {}, flags {})", u64(buffer_ci.size),
+                   u32(mem_type), vk::to_string(buffer_ci.flags));
         bda_addr = bda_result;
         RecordBda(bda_addr, buffer_ci.size);
     }

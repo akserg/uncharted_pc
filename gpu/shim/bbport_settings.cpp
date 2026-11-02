@@ -21,6 +21,18 @@ float Clamp(float v, float lo, float hi) {
     return std::clamp(v, lo, hi);
 }
 
+#ifdef __APPLE__
+// macOS (M4): FSR 4 / 4.1.1 need the GPU shaders of vk_fsr4.cpp (INT8/FP8 dot products, compute shader derivatives);
+// MoltenVK has neither, and the decision is to keep them off: selection is refused here and the support flags stay false.
+void RefuseFsr4(Values& v) {
+    if (IsFsr4(v.upscaler)) {
+        std::printf("Upscaler: %s is disabled on macOS (M4); using %s\n", UpscalerName(v.upscaler),
+                    UpscalerName(DefaultUpscaler));
+        v.upscaler = DefaultUpscaler;
+    }
+}
+#endif
+
 void Set(Values& v, const std::string& key, const std::string& value) {
     const float f = float(std::atof(value.c_str()));
     const int i = std::atoi(value.c_str());
@@ -30,6 +42,9 @@ void Set(Values& v, const std::string& key, const std::string& value) {
                 v.upscaler = u;
             }
         }
+#ifdef __APPLE__
+        RefuseFsr4(v);
+#endif
     } else if (key == "frame_gen") {
         for (int g = 0; g < FrameGenCount; ++g) {
             if (value == FrameGenName(g)) {
@@ -115,6 +130,9 @@ void Load() {
         for (int u = 0; u < UpscalerCount; ++u) {
             if (std::strcmp(env, UpscalerName(u)) == 0) v.upscaler = u;
         }
+#ifdef __APPLE__
+        RefuseFsr4(v);
+#endif
     }
     const std::pair<const char*, const char*> env_keys[] = {
         {"BB_FSR_SHARPNESS", "sharpness"},        {"BB_JITTER", "jitter"},
@@ -141,6 +159,10 @@ void Load() {
 
 void ConfigureUpscalerSupport(bool fsr4, bool fsr411) {
     auto& v = Get();
+#ifdef __APPLE__
+    fsr4 = fsr411 = false; // forced off on macOS: the overlay does not offer FSR 4 and the fallback below is not needed
+    RefuseFsr4(v);
+#endif
     v.fsr4_supported = fsr4;
     v.fsr411_supported = fsr4 && fsr411;
     const int requested = v.upscaler;
