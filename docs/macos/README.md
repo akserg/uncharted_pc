@@ -24,6 +24,7 @@ Hardware target: M-series Mac, **24 GB unified memory or more** (6 GB "VRAM" + ~
 
 | # | Spec | Goal | Done when |
 |---|---|---|---|
+| — | [GAME_FILES.md](GAME_FILES.md) | Game folder layout the loader expects | reference |
 | M0 | [M0-baseline.md](M0-baseline.md) | Reference numbers from the Linux x86-64 port | FPS/scene table recorded |
 | M1 | [M1-host-compiles.md](M1-host-compiles.md) | `bb-probe` + `libbbgpu.dylib` link on macOS x86-64 | `ls out/bb-probe` succeeds |
 | M2 | [M2-memory.md](M2-memory.md) | Guest address space reservable under Rosetta | `tests/test_runtime` + new alias test pass |

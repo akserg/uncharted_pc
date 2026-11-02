@@ -11,23 +11,41 @@ U1 main menu renders in an SDL3 Cocoa window through MoltenVK.
   `vulkaninfo` (x86_64) lists the Apple GPU.
 
 ## Tasks
-1. **Window** (`gpu/shim/window.cpp`): finish the `cocoa` branch from M1. Use
+1. **Cocoa main-thread requirement** (found on the first real run, 2026-11-02): `bbgpu_init` → `bbgpu.cpp:239`
+   creates the SDL window and pumps events on a background `std::thread`, while the guest runs on the
+   process main thread (`enter_on_stack`, probe.c). Cocoa allows windows and event pumping only on the
+   main thread; SDL fails with `Failed to initialize SDL video: No available video device`.
+   Fix on `__APPLE__` only:
+   - `probe.c` `main()`: first thing, start a pthread "bb:main" (stack >= 16 MiB, `pthread_attr_setstacksize`)
+     that runs the existing main body (rename to `probe_main(argc, argv)`), then the real main thread calls
+     `dispatch_main()` (never returns). Process exit stays `exit()/_Exit()` from any thread, as today.
+     The whole loader + guest setup (signals/sigaltstack, `runtime_memory_reserve`, `set_gs`, enter_on_stack)
+     stays on bb:main, so per-thread TLS is unaffected. Check every place that assumes "main thread"
+     (e.g. `pthread_main_np`, watchdog, signal masks) and list them in Result.
+   - `bbgpu.cpp`: instead of `std::thread` for the window loop, `dispatch_async_f(dispatch_get_main_queue(), ...)`
+     with the same body (create WindowSDL, signal ready, PollEvents loop). The existing condition-variable
+     wait for `g_window_ready` stays.
+   - Any other SDL video/window call made off the main thread (resize, fullscreen toggle, title, cursor,
+     clipboard, message boxes): route through the main queue (`dispatch_sync` only if the main thread can
+     never be waiting on the caller, else `dispatch_async`). Grep `SDL_` in `gpu/shim` and list them.
+   - Verify: `SDL_IsMainThread()` is true inside WindowSDL's constructor (log it once).
+2. **Window** (`gpu/shim/window.cpp`): finish the `cocoa` branch from M1. Use
    `SDL_Metal_CreateView(window)` + `SDL_Metal_GetLayer(view)`; set `window_info.type = Metal`,
    `render_surface = CAMetalLayer*`. `vk_platform.cpp` already creates `vk::MetalSurfaceCreateInfoEXT`
    from that (`VK_USE_PLATFORM_METAL_EXT` is defined at the top of the file — check it is defined for
    this build, not only in shadPS4's original CMake).
-2. **Instance**: enable `VK_KHR_portability_enumeration` + `VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR`,
+3. **Instance**: enable `VK_KHR_portability_enumeration` + `VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR`,
    and `VK_KHR_portability_subset` on the device. Mirror whatever shadPS4's `vk_instance.cpp` does under
    `#ifdef __APPLE__`; this tree is a fork of it so the diff should apply almost verbatim.
-3. **Feature gates** (`vk_instance.h`): `subgroupSizeControl && maxSubgroupSize >= 64` is false on Apple
+4. **Feature gates** (`vk_instance.h`): `subgroupSizeControl && maxSubgroupSize >= 64` is false on Apple
    (wave32). Find every use of that predicate and the `shaderFloat16`/`shaderInt8`/`shaderInt16` gates;
    confirm `lower_wave64_pass` is taken when subgroup 64 is unavailable, and that the "NVIDIA crash fix"
    64-wide compute special case has a wave32 path. Record which gates are false on the Apple GPU.
-4. **Host shaders**: `glslang --target-env vulkan1.3` output must be accepted by MoltenVK. Any that use
+5. **Host shaders**: `glslang --target-env vulkan1.3` output must be accepted by MoltenVK. Any that use
    unsupported features will fail at pipeline creation — list them.
-5. **Upscalers**: DLSS/XeSS are `_WIN32`-only; FSR 4 is still compiled on Apple (M1 decision) — force it off at run time on `__APPLE__` (settings default + refuse selection with a log line) and that config defaults on macOS select
+6. **Upscalers**: DLSS/XeSS are `_WIN32`-only; FSR 4 is still compiled on Apple (M1 decision) — force it off at run time on `__APPLE__` (settings default + refuse selection with a log line) and that config defaults on macOS select
    TAA or "off". FSR 3.1 compiles but is not required to work in M4.
-6. **Run** to the main menu. Capture `user/last_run.log` and MoltenVK's own log
+7. **Run** to the main menu. Capture `user/last_run.log` and MoltenVK's own log
    (`MVK_CONFIG_LOG_LEVEL=2`) for the first frame.
 
 ## Acceptance

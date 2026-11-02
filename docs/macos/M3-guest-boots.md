@@ -181,5 +181,7 @@ Decisions:
 2. **Pool backend: mach memory entry, accepted** (10 GB written in 120 s with the file backend).
    Discard-by-memset keeps pages resident; revisit with `madvise(MADV_FREE_REUSABLE)` only if M5 shows
    memory growth.
-3. **Linux/Windows regressions**: Linux build + tests to be re-run by the reviewer from the pushed branch.
+3. **Linux regression: PASS** (reviewer, 2026-11-01). Branch `macos` at `4b735e9` built on Ubuntu 24.04 x86-64
+   (gcc-14, LTO off; the changed `liverpool.cpp`, `buffer_cache.cpp`, `page_manager.cpp` recompiled) and
+   `bash build.sh --test` passed all 6 Linux tests, exit 0. Windows not verified (no MSYS2 environment).
 4. Watchdog Mach enumeration not async-signal-safe: acceptable (diagnostic path, process is already dying).
