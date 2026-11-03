@@ -855,6 +855,28 @@ bool Presenter::PresentImage(Frame* frame, vk::Image image, bool last) {
                          vk::ImageLayout::eTransferDstOptimal,
                          MakeImageBlitFit(frame->width, frame->height, extent.width, extent.height),
                          vk::Filter::eLinear);
+        // bbport: BB_DUMP_FRAME=<prefix> writes the presented frame (before the overlay) as
+        // <prefix>-<n>.ppm every BB_DUMP_FRAME_EVERY seconds (default 10), for hosts where the
+        // screen cannot be captured.
+        if (dump_frame.active) {
+            dump_frame.pending = false;
+            const auto now = std::chrono::steady_clock::now();
+            if (dump_frame.count == 0 || now - dump_frame.last >= dump_frame.every) {
+                dump_frame.last = now;
+                dump_frame.width = frame->width;
+                dump_frame.height = frame->height;
+                dump_frame.buffer = std::make_unique<VideoCore::Buffer>(
+                    instance, 0, u64{frame->width} * frame->height * 4,
+                    VideoCore::MemoryType::HostCached, "frame dump");
+                const vk::BufferImageCopy region{
+                    .imageSubresource = {vk::ImageAspectFlagBits::eColor, 0, 0, 1},
+                    .imageExtent = {frame->width, frame->height, 1},
+                };
+                cmdbuf.copyImageToBuffer(image, vk::ImageLayout::eTransferSrcOptimal,
+                                         dump_frame.buffer->Handle(), region);
+                dump_frame.pending = true;
+            }
+        }
         // bbport: the settings menu / FPS counter over the frame, at display resolution.
         BbOverlay::NotePresent();
         const bool overlay = BbOverlay::Visible();
@@ -918,6 +940,29 @@ bool Presenter::PresentImage(Frame* frame, vk::Image image, bool last) {
         info.AddSignal(frame->present_done);
     }
     scheduler.Flush(info);
+    if (dump_frame.pending) {
+        dump_frame.pending = false;
+        scheduler.Finish();
+        dump_frame.buffer->Invalidate(0, u64{dump_frame.width} * dump_frame.height * 4);
+        const std::string path = dump_frame.prefix + "-" + std::to_string(dump_frame.count++) + ".ppm";
+        if (std::FILE* f = std::fopen(path.c_str(), "wb")) {
+            std::fprintf(f, "P6\n%u %u\n255\n", dump_frame.width, dump_frame.height);
+            const u8* px = dump_frame.buffer->mapped_data.data();
+            std::vector<u8> rgb(size_t{dump_frame.width} * dump_frame.height * 3);
+            const bool bgra = FrameGenerator::ColorFormat == vk::Format::eB8G8R8A8Unorm ||
+                              FrameGenerator::ColorFormat == vk::Format::eB8G8R8A8Srgb;
+            for (size_t i = 0; i < size_t{dump_frame.width} * dump_frame.height; ++i) {
+                rgb[i * 3 + 0] = px[i * 4 + (bgra ? 2 : 0)];
+                rgb[i * 3 + 1] = px[i * 4 + 1];
+                rgb[i * 3 + 2] = px[i * 4 + (bgra ? 0 : 2)];
+            }
+            std::fwrite(rgb.data(), 1, rgb.size(), f);
+            std::fclose(f);
+            std::printf("Frame dump: %s (%ux%u)\n", path.c_str(), dump_frame.width,
+                        dump_frame.height);
+        }
+        dump_frame.buffer.reset();
+    }
 
     // Present to swapchain.
     {

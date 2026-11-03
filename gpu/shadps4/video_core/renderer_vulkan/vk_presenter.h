@@ -152,6 +152,25 @@ private:
     vk::UniqueCommandPool command_pool;
     std::vector<Frame> present_frames;
     std::queue<Frame*> free_queue;
+    /// bbport: BB_DUMP_FRAME diagnostics (see PresentImage).
+    struct DumpFrame {
+        DumpFrame() {
+            if (const char* env = std::getenv("BB_DUMP_FRAME"); env && env[0]) {
+                active = true;
+                prefix = env;
+            }
+            if (const char* env = std::getenv("BB_DUMP_FRAME_EVERY")) {
+                every = std::chrono::seconds(std::max(1, std::atoi(env)));
+            }
+        }
+        bool active{};
+        bool pending{};
+        std::string prefix;
+        std::chrono::seconds every{10};
+        std::chrono::steady_clock::time_point last{};
+        u32 count{}, width{}, height{};
+        std::unique_ptr<VideoCore::Buffer> buffer;
+    } dump_frame;
     Frame* last_submit_frame;
     std::mutex free_mutex;
     std::condition_variable free_cv;
