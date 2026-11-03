@@ -11,6 +11,9 @@
 #include "common/assert.h"
 #include "common/logging/log.h"
 #include "sdl_window.h"
+#ifdef __APPLE__
+#include "bbport_perf_log.h"
+#endif
 #include "bbport_overlay.h"
 #include "video_core/renderer_vulkan/vk_frame_capture.h"
 
@@ -237,6 +240,12 @@ bool WindowSDL::PollEvents() {
         if (event.type == SDL_EVENT_KEY_DOWN && event.key.key == SDLK_F10 && !event.key.repeat) {
             Vulkan::FrameCapture::ArmTextureDump();
         }
+#ifdef __APPLE__
+        // bbport (macOS, M5): F8 writes "MARK <n> t=<s>" to the log (play-session landmarks).
+        if (event.type == SDL_EVENT_KEY_DOWN && event.key.key == SDLK_F8 && !event.key.repeat) {
+            BbPerfLog::Mark();
+        }
+#endif
         // The controller finishes the text dialog too: Cross (A) accepts, Circle (B) cancels.
         if (text_active && event.type == SDL_EVENT_GAMEPAD_BUTTON_DOWN &&
             (event.gbutton.button == SDL_GAMEPAD_BUTTON_SOUTH ||

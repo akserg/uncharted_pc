@@ -1,5 +1,8 @@
 // bbport (macOS, M5 A1): BB_PERF_LOG=1 prints one line every 5 s:
-//   PERF: fps=<f> ft_p50=<ms> ft_p99=<ms> gpu_thread_cpu=<%> footprint_mb=<MB> frames=<n> window_s=<s>
+//   PERF: t=<s> fps=<f> ft_p50=<ms> ft_p99=<ms> gpu_thread_cpu=<%> footprint_mb=<MB> frames=<n> window_s=<s>
+// t = seconds since the GPU library was loaded (~launch). F8 in the game window prints
+//   MARK <n> t=<s>
+// so a player can tie PERF lines and bugs to a place in the game (window.cpp).
 // fps / frame times come from guest flips (VideoOutDriver::Flip), gpu_thread_cpu is the CPU time of
 // the GPU command thread (Liverpool::Process) over the window via thread_info(THREAD_BASIC_INFO),
 // footprint is task_info(TASK_VM_INFO).phys_footprint. Darwin only (the Linux statistics use
@@ -17,6 +20,19 @@
 #include <pthread.h>
 
 namespace BbPerfLog {
+
+/// Seconds since the GPU library was loaded (about the process start).
+inline const std::chrono::steady_clock::time_point load_time = std::chrono::steady_clock::now();
+inline double Seconds() {
+    return std::chrono::duration<double>(std::chrono::steady_clock::now() - load_time).count();
+}
+
+/// F8: a numbered marker line in the log (always on).
+inline void Mark() {
+    static std::atomic<int> count{0};
+    std::printf("MARK %d t=%.1f (F8)\n", ++count, Seconds());
+    std::fflush(stdout);
+}
 
 /// Mach port of the GPU command thread (0 until Liverpool::Process starts).
 inline std::atomic<std::uint32_t> gpu_thread_port{0};
@@ -82,9 +98,9 @@ inline void OnFlip() {
         const std::size_t i = std::min(sorted.size() - 1, std::size_t(p * double(sorted.size() - 1) + 0.5));
         return sorted[i];
     };
-    std::printf("PERF: fps=%.1f ft_p50=%.2f ft_p99=%.2f gpu_thread_cpu=%.1f%% footprint_mb=%.0f "
-                "frames=%zu window_s=%.2f\n",
-                frame_ms.size() / window, pct(0.50), pct(0.99), gpu_share,
+    std::printf("PERF: t=%.0f fps=%.1f ft_p50=%.2f ft_p99=%.2f gpu_thread_cpu=%.1f%% "
+                "footprint_mb=%.0f frames=%zu window_s=%.2f\n",
+                Seconds(), frame_ms.size() / window, pct(0.50), pct(0.99), gpu_share,
                 PhysFootprint() / (1024.0 * 1024.0), frame_ms.size(), window);
     std::fflush(stdout);
     frame_ms.clear();
