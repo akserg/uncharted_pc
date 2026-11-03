@@ -249,3 +249,85 @@ Upstream has no non-sparse structure that could be adopted, so option 3 (port up
 - Capability switch: `Instance::IsSparseBufferSupported()` = `features.sparseBinding && features.sparseResidencyBuffer` and `BB_NO_SPARSE` not `1`. Everything non-sparse hangs off it; the sparse path keeps its code and behaviour.
 - Non-sparse arena: an ordinary `VkBuffer` (no sparse flags) of the full arena size, one dedicated allocation (VMA, `AUTO_PREFER_DEVICE`; on Apple silicon this is the unified host-visible + device-local type), memory bound once at creation. `EnsureResident` keeps its resident-range bookkeeping and BDA page-table writes (the shaders still see per-block addresses), but allocates nothing and records no sparse bind; the `pending_binds` list stays empty so `SubmitPendingArenaBinds` is a no-op. `CopySparseMemory` is untouched (it is the guest-side copy, not a Vulkan call).
 - Arena migration (`GetArena`, a request spanning two VA arena pages that belong to different arenas) cannot rebind memory any more: the merged arena is a new buffer, so resident blocks are copied old arena -> new arena on the GPU and their BDA page-table entries are rewritten.
+
+### M4b outcome (2026-11-03)
+**U1 reaches its main menu on the Apple GPU (MoltenVK, Apple M4 Max) in the Cocoa window.** Sequence seen in presented frames: language select (~21 s after launch) -> "Uncharted: The Nathan Drake Collection" title -> "Drake's Fortune" title -> START menu (New Game / Options) -> New Game -> Friend Stats offline dialog -> Game Mode -> Campaign -> the first cutscene (3D character, camcorder overlay), all with input injected through `BB_PAD_FILE` (`cross` presses). No assertion, crash or device loss in any run (longest ~4 min).
+**KosmicKrisp could not be used: the SDK's `libvulkan_kosmickrisp.dylib` and `KosmicKrisp.framework` are arm64-only (`lipo -info`: Non-fat file, arm64)**, an x86_64 process under Rosetta cannot load them (loader: `ErrorIncompatibleDriver` with `VK_DRIVER_FILES=.../libkosmickrisp_icd.json`). The M4 note about "two devices" came from the native arm64 `vulkaninfo`; the x86_64 `bb-probe` only ever sees MoltenVK (new log line `GPU: device 0: Apple M4 Max, driverID Moltenvk, 1.4.2`). Everything below is therefore MoltenVK: `Apple M4 Max`, driverID MoltenVK, driverInfo 1.4.2, physical device index 0 (`BB_GPU_ID=0` pins it, the default pick is the same). Getting KosmicKrisp would need an x86_64 build of Mesa's KosmicKrisp driver (not attempted: needs an x86_64 LLVM/libclc toolchain, outside "link only from $BB_DEPS and $VULKAN_SDK") or the arm64-native port. The robustness2/nullDescriptor asserts: MoltenVK reports `robustBufferAccess2=false nullDescriptor=false`, so the M4 relaxation (warning instead of assert, `#ifdef __APPLE__` in `vk_instance.cpp CreateDevice`) still applies; a device that reports the features creates the device exactly as upstream does, so nothing was changed there.
+
+### Acceptance
+| Item | Result |
+|---|---|
+| `ROSETTA_ADVERTISE_AVX=1 bash build.sh --test` | PASS (exit 0, run after the last code change; `build.sh` prints 18 `PASS` lines, includes sub-checks) |
+| Sparse path unchanged when `sparseBinding` is supported | PASS **by inspection only**: no sparse-capable device exists on this machine and Linux was not compiled. Diff below |
+| U1 main menu on the Apple GPU in a Cocoa window, `out/m4-menu.png` | PASS on **MoltenVK**; **not** KosmicKrisp (arm64-only, see above). `out/m4-menu.png` (3456x1944) is a read-back of the presented frame via `BB_DUMP_FRAME` (before the settings overlay, before the letterbox blit), **not** a screen capture: `screencapture` fails for this shell (`could not create image from display`, no Screen Recording permission). I did not look at the actual window; the Cocoa window and `CAMetalLayer` swapchain exist and `vkQueuePresentKHR` succeeded every frame (no `Skipping frame`) |
+| MoltenVK: how far | the whole acceptance (it is the only driver). Also a first cutscene of the campaign |
+| Memory of non-sparse arenas | recorded below |
+| chunks.txt / InitializePlayGo finding | recorded below |
+
+### Design of the non-sparse path (as built)
+- `Instance::IsSparseBufferSupported()` (`vk_instance.h`): `features.sparseBinding && features.sparseResidencyBuffer && BB_NO_SPARSE != 1`. `BufferCache::sparse_arenas` caches it.
+- `UniqueBuffer::Create(..., emulate_sparse)` (`buffer.cpp`): `MemoryType::Sparse` with `emulate_sparse` is created as `MemoryType::DeviceLocal` (VMA `AUTO_PREFER_DEVICE`, dedicated allocation because it has a device address, no sparse flags, no mapping). On Apple that is the unified memory type. The `Buffer` keeps `mem_type == Sparse`. Falls back to system memory through the existing `Vram` logic if the allocation fails.
+- `BufferCache` ctor: the probe `DeviceBufferMemoryRequirements` has no sparse flags in plain mode; `arena_page_bits` starts at `MIN_ARENA_PAGE_BITS` (30, 1 GiB) in plain mode (still lowered by `maxBufferSize`), overridable with `BB_ARENA_PAGE_BITS` = 30..32. Sparse mode: unchanged (32, adapted to the driver limit).
+- `EnsureResident`: in plain mode `AllocateArenaMemory` is not called, no `SparseMemoryBind` is queued (`pending_binds` stays empty, so `SubmitPendingArenaBinds` returns at its first line); `resident_ranges` bookkeeping and the BDA page-table writes are unchanged (the page table stores `arena BDA + offset + block`).
+- `GetArena` migration (a request spanning two VA pages owned by different arenas): sparse mode unchanged; plain mode calls the new `MigrateArena`, which copies each resident range piece from its old arena into the new, larger buffer (`Runtime::CopyBuffer`) and rewrites its BDA page-table entries. **Never executed: no run, in any session, logged `migrat`ion.** It is the least verified code in this change.
+- Logs (all platforms): `Buffer cache: arena N created for guest ..., X MiB (sparse|plain buffer)` (also `... by migration ...`), `GPU: device I: name, driverID, driverInfo`, `GPU: using device ... (BB_GPU_ID=...)`.
+- `BB_NO_SPARSE=1` on MoltenVK was run once: output identical to the default (MoltenVK has no sparse anyway), so it only proves the variable is parsed; the forced-off path on a sparse-capable driver was not run.
+
+### Memory (MoltenVK, `footprint -p <pid>`, category "Owned physical footprint (unmapped) (graphics)" = Metal buffers; the guest itself is the `VM_ALLOCATE` rows)
+| Arena page | Live arenas | graphics footprint | note |
+|---|---|---|---|
+| 4 GiB (`BB_ARENA_PAGE_BITS=32`) | 0 | 0.60 GB | baseline (BDA page table 512 MiB, stream buffers) |
+| 4 GiB | 1 | 5.86 GB | +5.3 GB (4 GiB arena + ~1.1 GB of other buffers/images created at the same time) |
+| 4 GiB | 2 | 10.0 GB (process 12 GB) | +4.1 GB for the second arena. A 3rd (0x7200000000 page) did not appear before the menu; would be ~14 GB |
+| 1 GiB (default) | 3 | 4.83 GB | +4.2 GB: the three 1 GiB arenas + ~1.1 GB others |
+| 1 GiB | 4 | 5.96 GB (process 8.7 GB) | menu: +1.1 GB for the 4th |
+Conclusion: **Metal commits the whole buffer when it is created** (dirty, resident; 4 GiB arena = 4 GiB). `vmmap --summary` has no wired column; its totals match (`TOTAL` resident 8.3 GB, dirty 8.1 GB at the menu). Smaller pages are the only lever found: for U1's address use (0x7000000000..0x7214000000) 1 GiB pages commit ~4 GiB of arenas against 8-12 GiB with 4 GiB pages. Process footprint at the START menu with 1 GiB pages: **8.7 GB** (guest ~1.4 GB `VM_ALLOCATE` dirty + 512 MiB + graphics 6.0 GB + IOAccelerator 0.4 GB + misc). Not tried: importing the guest/host memory (`VK_EXT_external_memory_host` equivalent) so that pages stay lazy; MoltenVK does not offer it. Risk for gameplay: arenas multiply with the guest address ranges the game touches (each 1 GiB, committed in full); 16 GB Macs will swap.
+
+### Failures found after the buffer cache and their fixes
+None. After the arena change the run proceeded to the menus without any further macOS/driver-specific failure: no null-descriptor error, no dynamic-state error, no pipeline-creation failure (122 recompiled shaders in `user/cache/*/*.spv`, plus the host shaders for the frames shown), no Metal Toolchain needed (not installed; MoltenVK compiled MSL fine at runtime here). Warnings in the log during menus/cutscene: the known unsupported-extension/format lines, `Float32 denorm flushing is not supported by the GPU` (`emit_spirv.cpp:460`), `SanitizeCopyLayers: Coercing copy source layers N and destination layers M to minimum` x3 (`vk_runtime.cpp:60`), `Requested present mode Mailbox ... Fifo`, `1 stale pipelines ... re-generating the cache`, `[mvk-error] VK_INCOMPLETE: Error writing pipeline cache data` (once, when the process was killed), `sceVideodec2AllocateComputeQueue` stub. Visual quality was judged only from downscaled frame dumps: menus, text, the 3D cutscene frame look correct; nothing else was compared.
+
+### wave32 evidence
+`IsSubgroupSize64Supported()` false, `profile.subgroup_size` 32 (as in M4). Real shader: `user/cache/CUSA02344-nan1-106b-1a060209/0x0000000043b8ee5e_0.spv`, a compute shader with `LocalSize 8 8 1` (one GCN wave of 64) using `OpGroupNonUniformShuffleXor` with masks 1,2,4,8,16 (no 32) and `OpGroupNonUniformBroadcast(First)`; its shared-memory wave index is `LocalInvocationIndex >> 5` (`OpShiftRightLogical ... %u32_id_5`), i.e. 32-lane waves from `shared_memory_barrier_pass`, where GCN code would use 6. Pipelines were created and ran under MoltenVK. **No shader among the 122 cached ones contains `OpGroupNonUniformBallot*`/`Elect`, so `LowerWave64BallotPass` itself has still not been exercised by a real shader.** Whether results of those compute shaders are numerically right is unchecked.
+
+### chunks.txt / InitializePlayGo
+With `BB_FILE_TRACE=1` (extended in this session to also print stat/read/close of any path containing `chunks.txt`):
+```
+File trace: open(/app0/shareddata/chunks.txt) flags=0x0 -> fd 3, 5153 bytes      (thread NdCheckPlayGoStatusThread)
+File trace: stat(/app0/shareddata/chunks.txt) fd -1 0 0
+File trace: pread(/app0/shareddata/chunks.txt) fd 3 0 5153
+File trace: close(/app0/shareddata/chunks.txt) fd 3 0 0
+File trace: open(/app0/sce_sys/playgo-chunk.dat) flags=0x0 -> fd 3, 5168 bytes
+Runtime: PlayGo initialized; 100 chunks, all installed locally
+InitializePlayGo: running from pkg, real pkg installed with 100 chunks, chunks.txt IS NOT available
+```
+So the file **is** opened by path `/app0/shareddata/chunks.txt` (O_RDONLY, through the `/app0` mount = `$BB_GAME_DIR`), stat'ed and read whole at offset 0, once, at PlayGo init, then `playgo-chunk.dat` is opened. The "IS NOT available" line is therefore not a failed lookup: it is the game's own text for its "real pkg" branch (it logs the pkg mode after having read the file); it is printed whether or not the open worked (the open worked). It is the same line seen in M4 when the file was absent, because the message does not depend on the file. Not re-read later: through New Game -> Campaign -> first cutscene no further `chunks.txt` access occurred and no `chunkSetNameIsValid` assertion fired (a deeper level load was not reached). The patch is not applied when the file exists (no `MACOS:` line); when absent it prints `MACOS: chunks.txt missing, treating all chunks as installed (...)`. The absent-file path was not re-tested this session.
+
+### Timing (frame-dump resolution 2 s)
+Launch to first game frame ~7 s; language-select screen (first bright frame) **21 s** after launch, identical on a cold run (user/cache moved away) and a warm run (no measurable difference: pipelines compile fast / the cache is small, 2.2 MB). Launch to the START menu was not measured cleanly: scripted presses at 25 s (ignored, too early), 40 s, 55 s gave the DF title by ~49 s and the START menu by ~75 s. `run.sh` includes `prepare.py` (~1 s when `out/eboot` exists).
+
+### Shared-file changes (Linux/Windows not compiled; for the reviewer)
+- `gpu/shadps4/video_core/buffer_cache/buffer.h`: `UniqueBuffer::Create` gets a defaulted `bool emulate_sparse = false`; comment on `MemoryType::Sparse`.
+- `.../buffer_cache/buffer.cpp`: `Create`: `if (emulate_sparse) mem_type = DeviceLocal;` at the top; `Buffer::Buffer` passes `mem_type == Sparse && !instance.IsSparseBufferSupported()`. With a sparse-capable driver the argument is false: same code path as before.
+- `.../buffer_cache/buffer_cache.h`: `bool sparse_arenas{true}`, `MigrateArena` declaration.
+- `.../buffer_cache/buffer_cache.cpp`: ctor (`sparse_arenas`, plain-mode `arena_page_bits`, `BB_ARENA_PAGE_BITS`, probe flags expression), `GetArena` (migration branch, two `printf` lines that print on **all** platforms), `MigrateArena` (new), `EnsureResident` (`sparse_arenas ? AllocateArenaMemory : 0`, `ArenaBinds*` null in plain mode, `const vk::SparseMemoryBind bind` by value pushed only when sparse). With `sparse_arenas == true` the sequence of Vulkan calls is the same as before.
+- `.../renderer_vulkan/vk_instance.h`: `IsSparseBufferSupported()`, `#include <cstdlib>`. `vk_instance.cpp`: two `printf` lines (device list, chosen device), all platforms.
+- `.../renderer_vulkan/vk_presenter.{h,cpp}`: `BB_DUMP_FRAME`/`BB_DUMP_FRAME_EVERY` frame read-back to PPM (off unless set; the code sits in `PresentImage` between the blit and the overlay; when active it blocks on `scheduler.Finish()` per dump).
+- `src/runtime_file.c`: `trace_chunks` under `BB_FILE_TRACE`. `src/probe.c`: warning text (`__APPLE__` only). `run.sh`: Darwin branch pipes the probe through `tee -a user/last_run.log` (log truncated once per `run.sh` call; exit code kept via `PIPESTATUS`).
+No `#ifdef __APPLE__` was added inside the buffer cache.
+
+### Commits (all `macos:`)
+`c24878c` run.sh tee, chunks warning, M4b investigation and decision · `5171a36` non-sparse arenas + capability switch + device list · `cf9d146` BB_DUMP_FRAME · `e649ab3` chunks.txt trace · this Result.
+
+### Open issues
+1. **KosmicKrisp is arm64-only**: cannot be developed against in this process model; owner decision below.
+2. `MigrateArena` and the sparse path are untested (migration never happened; no sparse device).
+3. Memory: plain arenas are committed whole (1 GiB each). U1 menu = 8.7 GB process footprint; behaviour later in the game (more guest VA touched, more arenas, more migrations to 2 GiB buffers) unknown.
+4. The screenshot is a frame read-back, not a window capture; Screen Recording permission for the terminal would allow `screencapture`.
+5. `Frame` timing: no menu-time measurement better than ~2 s; first scripted press at 25 s was ignored.
+6. Everything in M4's open issues 3-9 still stands (U2/U3 untested, psarc, run-loop returning once, ...). `[mvk-error] Error writing pipeline cache data` at kill time is MoltenVK's own cache file write.
+7. LowerWave64BallotPass unexercised; compute-shader result correctness unchecked.
+
+### Needs a decision from the owner
+- KosmicKrisp: drop it as a target for the x86_64-under-Rosetta design (MoltenVK it is), or invest in an x86_64 Mesa build?
+- Is the memory cost acceptable (arenas committed in full)? A lazy alternative needs host-pointer import which MoltenVK lacks.
+- Grant Screen Recording to the terminal (Claude Code host) if real window screenshots are wanted for M5.
