@@ -260,3 +260,21 @@ Decisions:
 2. **16 MiB arenas: no**, until old arenas are freed after a merge (leak risk).
 3. **Save data**: the owner's `user/` is the real play profile; writes there are expected. The owner backs up
    `user/savedata` before each session (PLAYTEST step).
+4. **Linux regression: PASS** (reviewer, 2026-11-03). Branch `macos` at `3981796` built on Ubuntu 24.04
+   x86-64 (gcc-14, LTO off; `buffer.cpp`, `buffer_cache.cpp`, `vk_instance.cpp`, `vk_rasterizer.cpp`
+   recompiled) and `bash build.sh --test` passed all 6 Linux tests, exit 0. The sparse path compiles unchanged;
+   it is not exercised at run time (no sparse-capable GPU in the reviewer environment). Windows not verified.
+
+#### Session 2 (owner, 2026-11-03, log `user/m5-session-2.log`, recorded by the reviewer)
+- ~12 min of U1 (t=13…703 s): Continue → chapter 1 gameplay. **No crash, no assert.**
+- Controller: Xbox Series X over **USB-C worked** this time (`gamepad connected: Xbox Series X Controller`).
+  Bluetooth not tested.
+- Keys: `MARK 1 t=213.7 (F8)` logged; F10 opened the settings overlay (owner screenshot, overlay title
+  "Insert / F10 / L3+R3", 60 FPS 16.7 ms at that moment). F8/F10 arrive as `KEY: F8 (scancode 65)` /
+  `KEY: F10 (scancode 67)`.
+- Perf (138 five-second windows): 28 windows ≥ 58 fps, 66 at 45–58 fps, 44 below 45 fps; mean 48.3 fps,
+  lowest window 22.3 fps (t=268, a 9.4 s window — loading). p50 frame time stays 16.67 ms; p99 33.34 ms in
+  gameplay. **GPU-command-thread CPU averages 75 % in windows below 45 fps vs 54 % otherwise, peaking at 81 %**:
+  the GPU command thread (translated by Rosetta) is the likely limit.
+- Memory: footprint rises from 6.9 GB (START) to **12.9 GB** in gameplay.
+- Audio, Bluetooth controller, chapter-1 completion: not reported yet.
