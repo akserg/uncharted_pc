@@ -1001,7 +1001,7 @@ static void patch_missing_chunks_txt(const char *app0, uint64_t image_size) {
         if (!epilogue || path_start+7>trap+2) continue;
         const int32_t back=(int32_t)(epilogue-(path_start+2+5));
         path_start[0]=0xb0; path_start[1]=0x01; path_start[2]=0xe9; memcpy(path_start+3,&back,4);
-        printf("MACOS: %s is missing; unknown chunk sets count as installed (IsChunkSetEntirelyWithin patched at image+%#" PRIx64 ")\n",
+        printf("MACOS: chunks.txt missing, treating all chunks as installed (%s; IsChunkSetEntirelyWithin patched at image+%#" PRIx64 ")\n",
                path,(uint64_t)(path_start-image));
         return;
     }

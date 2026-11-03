@@ -234,3 +234,18 @@ Decisions:
    installed` warning. GAME_FILES.md updated.
 4. `run.sh`: yes, `tee` the probe output to `user/last_run.log` (Darwin path at least).
 5. psarc extraction: not now; revisit only if a missing-file path blocks the menu.
+
+## M4b (continuation: non-sparse buffer arenas, run to the menu)
+
+Started 2026-11-03, branch `macos`, same machine and toolchain as M4. Step 0 preconditions all held (clean tree except `m gpu/third_party/fsr-vulkan`; `build.sh --test` green; the M4 stop reproduced; `shareddata/chunks.txt` present in the dump).
+
+### Upstream investigation (shadPS4 `main`, fetched 2026-11-03 with a summarising fetch tool, so treat line-level claims as second-hand)
+- **Does upstream use sparse residency?** Yes. `src/video_core/buffer_cache/` (buffer.{h,cpp}, buffer_cache.{h,cpp}, fault_manager.{h,cpp}, memory_tracker.h, range_set.h, region_*.h) has the same design as this fork: `MemoryType::Sparse` buffers created with `eSparseBinding|eSparseResidency` and no VMA allocation, `arenas`, `address_space[]`, `resident_ranges`, `EnsureResident` building `vk::SparseMemoryBind`s, `SubmitPendingArenaBinds` calling `bindSparse`, and a `bda_pagetable_buffer` that `EnsureResident` fills with block device addresses. So **the arenas are not a bbport addition.**
+- **Is it optional?** No. Upstream `vk_instance.cpp` only copies `sparseBinding`/`sparseResidencyBuffer` into the device feature request; there is no assert, no capability check and no non-sparse path in the buffer cache. It has no `__APPLE__`/MoltenVK code in either file. I did not find how (or whether) current upstream `main` runs on MoltenVK; a web search found nothing, and Metal cannot place sparse tiles in a buffer (MoltenVK issue 1700), so I expect it does not use this buffer cache path on macOS.
+- **What is a bbport addition** (comments in this fork): `arena_page_bits` shrinking to the driver's `maxBufferSize` (upstream uses a constant `ARENA_PAGE_BITS`), `AllocateArenaMemory` chunking and the system-memory fallback, the side queue, landing gate, diagnostics.
+
+### Decision
+Upstream has no non-sparse structure that could be adopted, so option 3 (port upstream's) is moot. **Option 1 it is: non-sparse arenas.**
+- Capability switch: `Instance::IsSparseBufferSupported()` = `features.sparseBinding && features.sparseResidencyBuffer` and `BB_NO_SPARSE` not `1`. Everything non-sparse hangs off it; the sparse path keeps its code and behaviour.
+- Non-sparse arena: an ordinary `VkBuffer` (no sparse flags) of the full arena size, one dedicated allocation (VMA, `AUTO_PREFER_DEVICE`; on Apple silicon this is the unified host-visible + device-local type), memory bound once at creation. `EnsureResident` keeps its resident-range bookkeeping and BDA page-table writes (the shaders still see per-block addresses), but allocates nothing and records no sparse bind; the `pending_binds` list stays empty so `SubmitPendingArenaBinds` is a no-op. `CopySparseMemory` is untouched (it is the guest-side copy, not a Vulkan call).
+- Arena migration (`GetArena`, a request spanning two VA arena pages that belong to different arenas) cannot rebind memory any more: the merged arena is a new buffer, so resident blocks are copied old arena -> new arena on the GPU and their BDA page-table entries are rewritten.

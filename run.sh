@@ -53,15 +53,30 @@ prepare_all() {
 
 prepare_all
 
+# macOS: the probe output is also written to $USER_DIR/last_run.log (one file per run.sh call,
+# appended across loadexec switches).
+LAST_RUN_LOG="$USER_DIR/last_run.log"
+[ "$(uname -s)" = Darwin ] && : > "$LAST_RUN_LOG"
+
 while true; do
     rm -f "$BB_LOADEXEC_FILE"
-    "$PROBE" "$OUT/boot-linked.bin" \
-        --content-profile "$OUT/content.bin" \
-        --app0 "$GAME" \
-        --user "$USER_DIR" \
-        --timeout "${BB_TIMEOUT:-0}" \
-        "$@"
-    code=$?
+    if [ "$(uname -s)" = Darwin ]; then
+        "$PROBE" "$OUT/boot-linked.bin" \
+            --content-profile "$OUT/content.bin" \
+            --app0 "$GAME" \
+            --user "$USER_DIR" \
+            --timeout "${BB_TIMEOUT:-0}" \
+            "$@" 2>&1 | tee -a "$LAST_RUN_LOG"
+        code=${PIPESTATUS[0]}
+    else
+        "$PROBE" "$OUT/boot-linked.bin" \
+            --content-profile "$OUT/content.bin" \
+            --app0 "$GAME" \
+            --user "$USER_DIR" \
+            --timeout "${BB_TIMEOUT:-0}" \
+            "$@"
+        code=$?
+    fi
 
     if [ "$code" -ne 101 ] || [ ! -f "$BB_LOADEXEC_FILE" ]; then
         exit "$code"
