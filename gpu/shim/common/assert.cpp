@@ -25,9 +25,18 @@ static void abandon_speculation() {
 #endif
 }
 
+#ifdef __APPLE__
+extern "C" void (*runtime_crash_hook)(const char* why); // probe.c crash record (M5 A2)
+#endif
+
 void assert_fail_impl() {
     abandon_speculation();
     std::fflush(stdout);
+#ifdef __APPLE__
+    if (runtime_crash_hook) {
+        runtime_crash_hook("GPU library assertion");
+    }
+#endif
     std::fputs("STOP: GPU library assertion failed (see GPU log above)\n", stderr);
     std::_Exit(23);
 }

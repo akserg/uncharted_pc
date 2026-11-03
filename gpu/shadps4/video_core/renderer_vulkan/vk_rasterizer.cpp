@@ -61,6 +61,9 @@ extern bool (*g_draw_pipe_busy)();
 extern bool g_gpu_checkpoints;
 extern VkQueue g_crash_queue;
 extern void (*g_gpu_checkpoint_report)();
+#ifdef __APPLE__
+extern bool g_gpu_checkpoints_nv;
+#endif
 } // namespace Vulkan
 namespace VideoCore {
 void EnableFaultHistory();
@@ -102,6 +105,11 @@ const void* NoteCheckpoint(const char* kind, u64 hash0, u64 hash1, u32 a, u32 b,
     record = {seq, kind, {hash0, hash1}, {a, b, c}, args};
     record.num_buffers = num_checkpoint_buffers;
     std::copy_n(checkpoint_buffers, num_checkpoint_buffers, record.buffers);
+#ifdef __APPLE__
+    if (!g_gpu_checkpoints_nv) {
+        return nullptr; // recorded on the CPU only: no setCheckpointNV (MoltenVK)
+    }
+#endif
     return reinterpret_cast<const void*>(static_cast<uintptr_t>(seq));
 }
 
@@ -136,6 +144,20 @@ void PrintCheckpoint(u64 seq) {
 }
 
 void ReportCheckpoints() {
+#ifdef __APPLE__
+    if (!g_gpu_checkpoints_nv) {
+        // No driver checkpoints: the commands the GPU command thread recorded last (the GPU may
+        // not have reached them).
+        const u64 latest = checkpoint_seq.load();
+        std::printf("GPU checkpoint (CPU side, no VK_NV_device_diagnostic_checkpoints): %llu "
+                    "draws/dispatches recorded; the last ones:\n",
+                    static_cast<unsigned long long>(latest));
+        for (u64 s = latest > 3 ? latest - 3 : 1; s && s <= latest; ++s) {
+            PrintCheckpoint(s);
+        }
+        return;
+    }
+#endif
     const auto get = VULKAN_HPP_DEFAULT_DISPATCHER.vkGetQueueCheckpointDataNV;
     if (!g_crash_queue || !get) {
         return;

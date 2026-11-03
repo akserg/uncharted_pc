@@ -16,6 +16,11 @@ typedef bb_jmp_buf sigjmp_buf;
 #endif
 /* Recovery point for speculative guest memory reads on this thread (probe.c fault handler). */
 extern __thread sigjmp_buf *runtime_fault_recover;
+#ifdef __APPLE__
+/* Crash record (M5 A2, set by probe.c): guest RIP, image offset, thread stacks and GPU checkpoint, printed
+ * before a fatal stop (GPU assertion, guest debug exception). NULL in tests. */
+extern void (*runtime_crash_hook)(const char *why);
+#endif
 /* Restarts the game (in-game settings menu, render resolution change). */
 void runtime_restart(void);
 /* BB_GAME_RES: rewrites the display configuration the game initializes (runtime_display.c). */

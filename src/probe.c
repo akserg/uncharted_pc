@@ -436,6 +436,9 @@ static uint64_t patch_tcb_loads(const Segment *segments, uint64_t count) {
     return patched;
 }
 #endif
+#ifdef __APPLE__
+static void crash_record(int sig, siginfo_t *info, ucontext_t *uc, const char *why);
+#endif
 #ifndef _WIN32
 static void fault(int sig, siginfo_t *info, void *context) {
     /* Instructions this CPU lacks (cpu_patch.c): a rewritten breakpoint (rip after the int3) or
@@ -490,6 +493,9 @@ static void fault(int sig, siginfo_t *info, void *context) {
             snprintf(line, sizeof(line), "  #%d %p\n", i, frames[i]);
         ssize_t written_=write(2, line, strlen(line)); (void)written_;
     }
+#ifdef __APPLE__
+    crash_record(sig, info, uc, "fatal signal");
+#endif
     _exit(128 + sig);
 }
 #endif
@@ -560,6 +566,81 @@ static void watchdog(int sig, siginfo_t *info, void *context) {
 #endif
     usleep(100000);
     _exit(128 + sig);
+}
+#endif
+#ifdef __APPLE__
+/* M5 A2: one crash record in user/last_run.log (run.sh tees stdout+stderr): the guest RIP and image offset,
+ * every thread's frames (this one first, the others through the SIGUSR2 dump) and the GPU checkpoint.
+ * Called from fault() (uc set) and through runtime_crash_hook for assertions (uc NULL: this thread
+ * dumps itself with SIGUSR2). Not async-signal-safe (snprintf, task_threads, the GPU report), acceptable
+ * for a path that ends the process. */
+static int crash_recorded;
+static void crash_write(const char *text) { ssize_t written_=write(2,text,strlen(text)); (void)written_; }
+static void crash_record(int sig, siginfo_t *info, ucontext_t *uc, const char *why) {
+    if (__atomic_exchange_n(&crash_recorded,1,__ATOMIC_ACQ_REL)) return;
+    fflush(stdout);
+    char name[64]="?", line[512];
+    pthread_getname_np(pthread_self(),name,sizeof(name));
+    snprintf(line,sizeof(line),"CRASH: ===== crash record (%s, signal %d) on thread '%s' tid %llu =====\n",why,sig,name,(unsigned long long)gettid());
+    crash_write(line);
+    if (uc) {
+        const uintptr_t rip=(uintptr_t)UC_RIP(uc);
+        Dl_info where;
+        if (image && rip-(uintptr_t)image<0x10000000)
+            snprintf(line,sizeof(line),"CRASH: rip=%p in the guest image: image base %p, image offset 0x%lx; fault address %p\n",
+                     (void *)rip,(void *)image,(unsigned long)(rip-(uintptr_t)image),info ? info->si_addr : NULL);
+        else if (dladdr((void *)rip,&where) && where.dli_fname)
+            snprintf(line,sizeof(line),"CRASH: rip=%p in host code %s+0x%lx (%s), image base %p; fault address %p\n",
+                     (void *)rip,where.dli_fname,(unsigned long)(rip-(uintptr_t)where.dli_fbase),
+                     where.dli_sname ? where.dli_sname : "?",(void *)image,info ? info->si_addr : NULL);
+        else
+            snprintf(line,sizeof(line),"CRASH: rip=%p (no module), image base %p; fault address %p\n",
+                     (void *)rip,(void *)image,info ? info->si_addr : NULL);
+        crash_write(line);
+        snprintf(line,sizeof(line),"CRASH: rax=%016llx rbx=%016llx rcx=%016llx rdx=%016llx rsi=%016llx rdi=%016llx rbp=%016llx rsp=%016llx\n",
+                 (unsigned long long)uc->uc_mcontext->__ss.__rax,(unsigned long long)uc->uc_mcontext->__ss.__rbx,
+                 (unsigned long long)uc->uc_mcontext->__ss.__rcx,(unsigned long long)uc->uc_mcontext->__ss.__rdx,
+                 (unsigned long long)uc->uc_mcontext->__ss.__rsi,(unsigned long long)uc->uc_mcontext->__ss.__rdi,
+                 (unsigned long long)uc->uc_mcontext->__ss.__rbp,(unsigned long long)uc->uc_mcontext->__ss.__rsp);
+        crash_write(line);
+    } else {
+        snprintf(line,sizeof(line),"CRASH: no signal context (assertion); image base %p; this thread's frames come first below\n",(void *)image);
+        crash_write(line);
+    }
+    crash_write("CRASH: thread stacks (tid, rip, image-relative = guest image offset, host-relative = bb-probe offset):\n");
+    if (uc) dump_frames(uc);
+    {
+        thread_act_array_t list=NULL;
+        mach_msg_type_number_t count=0;
+        pthread_t self=pthread_self();
+        if (!uc) { pthread_kill(self,SIGUSR2); usleep(20000); }
+        if (task_threads(mach_task_self(),&list,&count)==KERN_SUCCESS)
+            for (mach_msg_type_number_t i=0;i<count;++i) {
+                pthread_t other=pthread_from_mach_thread_np(list[i]);
+                if (other && !pthread_equal(other,self)) { pthread_kill(other,SIGUSR2); usleep(20000); }
+            }
+    }
+    usleep(100000);
+    crash_write("CRASH: GPU checkpoint:\n");
+    if (gpu_enabled) bbgpu_crash_report();
+    else crash_write("GPU checkpoint: GPU not initialized\n");
+    fflush(stdout);
+    crash_write("CRASH: ===== end of crash record =====\n");
+}
+static void crash_hook(const char *why) { crash_record(0,NULL,NULL,why); }
+/* BB_CRASH_TEST=<seconds>[:segv|abort|gpu-assert] (M5 A2 test hook, off unless set): a deliberate fatal error on
+ * the thread "bb:crash-test" after <seconds>, to check the crash record. */
+static void *crash_test_thread(void *arg) {
+    const char *spec=arg;
+    pthread_setname_np("bb:crash-test");
+    sleep((unsigned)strtoul(spec,NULL,10));
+    const char *kind=strchr(spec,':');
+    kind=kind ? kind+1 : "segv";
+    fprintf(stderr,"BB_CRASH_TEST: deliberate %s now\n",kind);
+    if (!strcmp(kind,"abort")) abort();
+    if (!strcmp(kind,"gpu-assert")) bbgpu_crash_test_assert();
+    *(volatile int *)(uintptr_t)0x10=1;
+    return NULL;
 }
 #endif
 /* param.sfo lookup: string or integer value of key, 0 when absent. */
@@ -1436,6 +1517,15 @@ int main(int argc, char **argv) {
     struct sigaction sa = {0}; sa.sa_sigaction = fault; sa.sa_flags = SA_SIGINFO;
     sigemptyset(&sa.sa_mask);
     sigaction(SIGSEGV, &sa, NULL); sigaction(SIGILL, &sa, NULL); sigaction(SIGBUS, &sa, NULL); sigaction(SIGTRAP, &sa, NULL);
+#ifdef __APPLE__
+    /* M5 A2: abort() (C++ terminate, libc checks) leaves a crash record too. */
+    sigaction(SIGABRT, &sa, NULL);
+    runtime_crash_hook=crash_hook;
+    if (getenv("BB_CRASH_TEST") && *getenv("BB_CRASH_TEST")) {
+        pthread_t crash_test;
+        if (!pthread_create(&crash_test,NULL,crash_test_thread,getenv("BB_CRASH_TEST"))) pthread_detach(crash_test);
+    }
+#endif
     Dl_info self_info;
     if (dladdr((void *)main,&self_info)) exe_base=(uintptr_t)self_info.dli_fbase;
     struct sigaction dump = {0}; dump.sa_sigaction = thread_dump; dump.sa_flags = SA_SIGINFO|SA_RESTART;

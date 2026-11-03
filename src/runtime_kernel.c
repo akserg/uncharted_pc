@@ -189,8 +189,14 @@ static ABI __attribute__((noreturn)) void hard_exit(int status) {
     fflush(stdout);
     _exit(status);
 }
+#ifdef __APPLE__
+void (*runtime_crash_hook)(const char *why);
+#endif
 static ABI __attribute__((noreturn)) void raise_exception(uint32_t code,uint64_t argument) {
     fprintf(stderr,"STOP: guest raised debug exception code=0x%x argument=0x%llx\n",code,(unsigned long long)argument);
+#ifdef __APPLE__
+    if (runtime_crash_hook) runtime_crash_hook("guest debug exception");
+#endif
     runtime_report();
     exit(23);
 }

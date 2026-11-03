@@ -27,6 +27,12 @@ bool g_device_fault_ext = false;
 // last checkpoints a GPU crash report prints.
 bool g_gpu_checkpoints = false;
 VkQueue g_crash_queue = VK_NULL_HANDLE;
+#ifdef __APPLE__
+// bbport (macOS, M5 A2): true when the checkpoints are also written into the command stream
+// (VK_NV_device_diagnostic_checkpoints). MoltenVK lacks the extension: BB_GPU_CHECKPOINTS=1 then
+// keeps only the CPU-side record of the draws/dispatches the GPU command thread recorded last.
+bool g_gpu_checkpoints_nv = false;
+#endif
 
 namespace {
 
@@ -424,6 +430,15 @@ bool Instance::CreateDevice() {
     g_device_fault_ext = add_extension(VK_EXT_DEVICE_FAULT_EXTENSION_NAME);
     if (const char* env = std::getenv("BB_GPU_CHECKPOINTS"); env && env[0] == '1') {
         g_gpu_checkpoints = add_extension(VK_NV_DEVICE_DIAGNOSTIC_CHECKPOINTS_EXTENSION_NAME);
+#ifdef __APPLE__
+        g_gpu_checkpoints_nv = g_gpu_checkpoints;
+        if (!g_gpu_checkpoints) {
+            g_gpu_checkpoints = true;
+            LOG_WARNING(Render_Vulkan, "BB_GPU_CHECKPOINTS: {} unavailable; recording the last "
+                                       "draws/dispatches on the CPU only",
+                        VK_NV_DEVICE_DIAGNOSTIC_CHECKPOINTS_EXTENSION_NAME);
+        }
+#endif
     }
     const bool address_report =
         AddressReportEnabled() && add_extension(VK_EXT_DEVICE_ADDRESS_BINDING_REPORT_EXTENSION_NAME);

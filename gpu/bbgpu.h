@@ -47,6 +47,12 @@ int bbgpu_mouse_sample(float *dx, float *dy, uint32_t *buttons, int *wheel);
 /* In-game trophy notice (the overlay draws it for a few seconds, one at a time): grade 1 platinum,
  * 2 gold, 3 silver, 4 bronze; png is the trophy's icon (a PNG file) or empty. */
 void bbgpu_trophy_notify(int grade, const char *game, const char *name, const void *png, uint64_t png_size);
+#ifdef __APPLE__
+/* Crash record (M5): prints the last GPU checkpoints (BB_GPU_CHECKPOINTS=1) or why there are none. */
+void bbgpu_crash_report(void);
+/* BB_CRASH_TEST=<s>:gpu-assert: fails a GPU-library assertion (test of the crash record). */
+void bbgpu_crash_test_assert(void);
+#endif
 /* Number of symbols registered by the vendored libraries (diagnostics). */
 unsigned bbgpu_symbol_count(void);
 #ifdef __cplusplus

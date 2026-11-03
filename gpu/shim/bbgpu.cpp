@@ -29,6 +29,7 @@
 #endif
 #include "../bbgpu.h"
 #include "bb_user_range.h"
+#include "common/assert.h"
 #include "common/elf_info.h"
 #include "common/logging/log.h"
 #include "common/rdtsc.h"
@@ -369,6 +370,27 @@ extern "C" int bbgpu_handle_fault(void* ucontext, void* address) {
 extern "C" unsigned bbgpu_symbol_count(void) {
     return unsigned(g_symbols.size());
 }
+
+#ifdef __APPLE__
+namespace Vulkan {
+extern bool g_gpu_checkpoints;
+extern void (*g_gpu_checkpoint_report)();
+} // namespace Vulkan
+// bbport (macOS, M5 A2): the GPU part of a crash record (probe.c crash_record).
+extern "C" void bbgpu_crash_report(void) {
+    if (Vulkan::g_gpu_checkpoint_report) {
+        Vulkan::g_gpu_checkpoint_report();
+    } else {
+        std::printf("GPU checkpoint: %s\n", Vulkan::g_gpu_checkpoints
+                                                ? "enabled, rasterizer not created yet"
+                                                : "off (BB_GPU_CHECKPOINTS=1 records the last draws)");
+    }
+    std::fflush(stdout);
+}
+extern "C" void bbgpu_crash_test_assert(void) {
+    ASSERT_MSG(false, "BB_CRASH_TEST: deliberate GPU library assertion");
+}
+#endif
 
 // Kernel service thread: runs boost::asio timers for equeue timer events.
 namespace Libraries::Kernel {
