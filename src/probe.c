@@ -1048,6 +1048,44 @@ static void patch_memory_area_base(uint64_t image_size) {
     if (!ndone) fputs("WARNING: MACOS: the game's memory area cursor (0x1000000000) was not found; "
                       "AllocateMemory will assert (see docs/macos/M4-window-moltenvk.md)\n",stderr);
 }
+/* The same assumption lives in the game's offset-pointer table (TGenericOffsetPtr.h, GenericOffsetTable): the loader
+ * (the function that also converts the 32-bit offsets of a loaded level file) fills the table once with two
+ * {base,size} entries, the image at 0 and the memory area at the PS4 user base, both 0x7FFFFFFF long:
+ *   mov qword [r+8],0x7FFFFFFF ; movabs rX,0x1000000000 ; mov [r+0x10],rX ; mov qword [r+0x18],0x7FFFFFFF ; mov dword [..],2
+ * GenerateOffset (pointer -> index<<31|offset) asserts `offsetTableIndex != -1` for a pointer that is in no entry. With the
+ * area moved to BB_USER_MIN by patch_memory_area_base no pointer into it matched entry 1 any more (M5 session 1:
+ * rbx=0x705d3cbd1c, entries {0,0x7FFFFFFF} {0x1000000000,0x7FFFFFFF}). The movabs immediate becomes BB_USER_MIN. */
+static void patch_offset_table_base(uint64_t image_size) {
+    const uint64_t old_base=UINT64_C(0x1000000000);
+    static const unsigned char lim[4]={0xff,0xff,0xff,0x7f};
+    unsigned ndone=0;
+    for (uint64_t at=0;at+8+10+4+8<=image_size;++at) {
+        const unsigned char *c=image+at;
+        /* mov qword [reg+8], 0x7FFFFFFF : REX.W(B) C7 /0 modrm(mod=01) 08 imm32 */
+        if ((c[0]&0xfa)!=0x48 || c[1]!=0xc7 || (c[2]&0xf8)!=0x40 || c[3]!=0x08 || memcmp(c+4,lim,4)) continue;
+        const unsigned char rex_b=c[0]&1, rm=c[2]&7;
+        const unsigned char *m=c+8;                                    /* movabs r64, old_base */
+        uint64_t imm; memcpy(&imm,m+2,8);
+        if ((m[0]&0xfa)!=0x48 || (m[1]&0xf8)!=0xb8 || imm!=old_base) continue;
+        const unsigned char *st=m+10;                                  /* mov [reg+0x10], r64 */
+        if ((st[0]&0xfa)!=0x48 || (st[0]&1)!=rex_b || st[1]!=0x89 || (st[2]&0xc7)!=(0x40|rm) || st[3]!=0x10) continue;
+        if (((st[2]>>3)&7)!=(m[1]&7) || ((st[0]>>2)&1)!=(m[0]&1)) continue;    /* stores the register just loaded */
+        const unsigned char *n=st+4;                                   /* mov qword [reg+0x18], 0x7FFFFFFF */
+        if ((n[0]&0xfa)!=0x48 || (n[0]&1)!=rex_b || n[1]!=0xc7 || (n[2]&0xff)!=(0x40|rm) || n[3]!=0x18 || memcmp(n+4,lim,4)) continue;
+        const uint64_t value=(uint64_t)BB_USER_MIN;
+        memcpy(image+at+8+2,&value,8);
+        printf("MACOS: offset table entry 1 base at image+%#" PRIx64 " moved from %#" PRIx64 " to %#" PRIx64 "\n",at+8+2,old_base,value);
+        ++ndone;
+    }
+    if (ndone) return;
+    static const char marker[]="GenericOffsetTable::s_totalValidOffsetTables";
+    for (uint64_t i=0;i+sizeof(marker)<=image_size;++i)
+        if (image[i]=='G' && !memcmp(image+i,marker,sizeof(marker))) {  /* the game has the table but the initialiser was not found */
+            fputs("WARNING: MACOS: the game's GenericOffsetTable initialiser (base 0x1000000000) was not found; "
+                  "GenerateOffset will assert for pointers into the memory areas\n",stderr);
+            return;
+        }
+}
 #endif
 #ifdef __APPLE__
 /* M4 task 9 workaround, NOT macOS-specific: this dump has no /app0/shareddata/chunks.txt (the game's LoadChunksTxt
@@ -1701,6 +1739,7 @@ int main(int argc, char **argv) {
         patch_eop_tick_wait(image_end);
 #ifdef __APPLE__
         patch_memory_area_base(image_end);
+        patch_offset_table_base(image_end);
         patch_missing_chunks_txt(app0,image_end);
 #endif
         patch_job_sleep(image_end);
