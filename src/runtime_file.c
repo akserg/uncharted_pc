@@ -316,11 +316,17 @@ static int64_t do_open(const char *guest,int flags,int mode) {
     }
     return fd;
 }
+/* BB_FILE_TRACE=1: reads, stats and closes of the PlayGo chunk list (what the game's chunks.txt check does). */
+static void trace_chunks(const char *what,const char *path,int fd,int64_t a,int64_t b) {
+    if (!path || !strstr(path,"chunks.txt") || !getenv("BB_FILE_TRACE")) return;
+    printf("File trace: %s(%s) fd %d %lld %lld\n",what,path,fd,(long long)a,(long long)b);
+}
 static int64_t do_close(int fd) {
     if (fd>=0 && fd<3) return 0;
     pthread_mutex_lock(&lock);
     File *f=get(fd);
     if (!f) { pthread_mutex_unlock(&lock); return -EBADF; }
+    trace_chunks("close",f->path,fd,0,0);
     if (f->host>=0) close(f->host);
     free_listing(f->dir);
     *f=(File){0};
@@ -403,6 +409,7 @@ static int64_t do_read(int fd,void *buffer,uint64_t size) {
     ssize_t n=read_full(h,buffer,size,-1);
     if (n<0) { if (audio_trace()) printf("Audio trace: read(fd %d, %llu) failed, errno %d\n",fd,(unsigned long long)size,errno); return -errno; }
     trace_bank_read(fd,size,-1,n);
+    trace_chunks("read",files[fd].path,fd,(int64_t)size,n);
     __atomic_add_fetch(&reads,1,__ATOMIC_RELAXED); __atomic_add_fetch(&bytes_read,(uint64_t)n,__ATOMIC_RELAXED);
     return n;
 }
@@ -412,6 +419,7 @@ static int64_t do_pread(int fd,void *buffer,uint64_t size,int64_t offset) {
     ssize_t n=read_full(h,buffer,size,offset);
     if (n<0) { if (audio_trace()) printf("Audio trace: pread(fd %d, %llu @%lld) failed, errno %d\n",fd,(unsigned long long)size,(long long)offset,errno); return -errno; }
     trace_bank_read(fd,size,offset,n);
+    trace_chunks("pread",files[fd].path,fd,offset,n);
     __atomic_add_fetch(&reads,1,__ATOMIC_RELAXED); __atomic_add_fetch(&bytes_read,(uint64_t)n,__ATOMIC_RELAXED);
     return n;
 }
@@ -464,6 +472,7 @@ static int64_t do_stat(const char *guest,GuestStat *out) {
     int e=translate(guest,path,sizeof(path));
     if (e) return -e;
     if (!out) return -EFAULT;
+    trace_chunks("stat",guest,-1,0,0);
     if (host_stat(path,&s)) return -errno;
     convert_stat(&s,out); return 0;
 }
