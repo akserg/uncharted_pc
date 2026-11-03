@@ -27,9 +27,14 @@ BB_GPU_ID=0 BB_PERF_LOG=1 BB_GPU_CHECKPOINTS=1 BB_GAME_DIR=/Users/akserg/Project
 | L3 / R3 | Left Shift / V | stick clicks |
 | Pause menu (Options) | Esc or Return | Options / Start |
 | D-pad | arrow keys, mouse wheel | d-pad |
-| Settings overlay | Insert (not on a MacBook keyboard: use the controller) | **L3 + R3 together** |
+| Settings overlay | **F10** (fn+F10 on a MacBook) or Insert | **L3 + R3 together** |
 | Free the mouse pointer | hold Left Option (Alt) | |
-| **Mark this spot in the log** | **F8** (fn+F8 on a MacBook) | |
+| **Mark this spot in the log** | **F8** (fn+F8 on a MacBook; if no `MARK` line shows up, see below) | |
+
+**F8/F10 on a MacBook:** a bare F8/F10 is a media key (play/pause, mute) that the game never sees. Either hold fn,
+or switch on System Settings → Keyboard → "Use F1, F2, etc. keys as standard function keys". To check which keys
+reach the game, start with `BB_KEY_LOG=1` in front of the command above: every key press prints a `KEY:` line in
+the log (`grep -E 'KEY:|MARK' user/last_run.log`).
 
 ## What to test
 1. **Chapter 1 end to end.** Press **F8** whenever something odd happens and at each perf spot below.
