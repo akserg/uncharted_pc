@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include <cstdlib>
 #include <span>
 #include <unordered_map>
 
@@ -51,6 +52,17 @@ public:
     }
     bool IsSubgroupSizeControlEnabled() const {
         return vk13_features.subgroupSizeControl;
+    }
+
+    /// bbport: true when the BufferCache arenas can be sparse-resident buffers. False on drivers
+    /// without sparseBinding/sparseResidencyBuffer (MoltenVK, KosmicKrisp), or with
+    /// BB_NO_SPARSE=1: the arenas are then ordinary full-size buffers (BufferCache).
+    bool IsSparseBufferSupported() const {
+        static const bool forced_off = [] {
+            const char* env = std::getenv("BB_NO_SPARSE");
+            return env && env[0] == '1';
+        }();
+        return !forced_off && features.sparseBinding && features.sparseResidencyBuffer;
     }
 
     /// Largest VkBuffer the driver allows (2 GiB on AMD's Windows driver).

@@ -123,6 +123,16 @@ Instance::Instance(const Frontend::WindowSystemInfo& window_info, s32 physical_d
     const std::size_t num_physical_devices = static_cast<u16>(physical_devices.size());
     ASSERT_MSG(num_physical_devices > 0, "No physical devices found");
     LOG_INFO(Render_Vulkan, "Found {} physical devices", num_physical_devices);
+    // bbport: list the devices so BB_GPU_ID can name one (indices are the enumeration order).
+    for (size_t i = 0; i < physical_devices.size(); ++i) {
+        const auto chain = physical_devices[i]
+                               .getProperties2<vk::PhysicalDeviceProperties2,
+                                               vk::PhysicalDeviceVulkan12Properties>();
+        std::printf("GPU: device %zu: %s, driverID %s, %s\n", i,
+                    chain.get<vk::PhysicalDeviceProperties2>().properties.deviceName.data(),
+                    vk::to_string(chain.get<vk::PhysicalDeviceVulkan12Properties>().driverID).c_str(),
+                    chain.get<vk::PhysicalDeviceVulkan12Properties>().driverInfo.data());
+    }
 
     if (physical_device_index < 0) {
         std::vector<
@@ -180,6 +190,8 @@ Instance::Instance(const Frontend::WindowSystemInfo& window_info, s32 physical_d
         physical_device = physical_devices[physical_device_index];
     }
 
+    std::printf("GPU: using device %s (BB_GPU_ID=%d)\n", physical_device.getProperties().deviceName.data(),
+                int(physical_device_index));
     available_extensions = GetSupportedExtensions(physical_device);
     format_properties = GetFormatProperties(physical_device);
     properties = physical_device.getProperties();

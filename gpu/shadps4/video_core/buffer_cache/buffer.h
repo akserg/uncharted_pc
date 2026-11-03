@@ -32,7 +32,7 @@ enum class MemoryType : u8 {
     HostUncached, ///< Requires a host visible memory type optimized for CPU to GPU uploads
     HostCached,   ///< Requires a host visible memory type optimized for GPU to CPU readbacks
     Stream,       ///< Requests device local host visible buffer, falling back host memory.
-    Sparse,       ///< Requires an unbacked sparse resident buffer.
+    Sparse,       ///< Requires an unbacked sparse resident buffer (a plain buffer when the driver has no sparse binding).
 };
 
 constexpr vk::BufferUsageFlags ReadFlags =
@@ -70,8 +70,10 @@ struct UniqueBuffer {
         return *this;
     }
 
+    /// `emulate_sparse`: MemoryType::Sparse on a driver without sparse binding, the buffer is a
+    /// plain dedicated allocation of its full size.
     void Create(vk::BufferCreateInfo& buffer_ci, MemoryType mem_type,
-                VmaAllocationInfo* out_alloc_info);
+                VmaAllocationInfo* out_alloc_info, bool emulate_sparse = false);
 
     void Destroy();
 

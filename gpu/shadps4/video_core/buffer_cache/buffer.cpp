@@ -154,8 +154,13 @@ void UniqueBuffer::Destroy() {
 }
 
 void UniqueBuffer::Create(vk::BufferCreateInfo& buffer_ci, MemoryType mem_type,
-                          VmaAllocationInfo* out_alloc_info) {
+                          VmaAllocationInfo* out_alloc_info, bool emulate_sparse) {
     const bool with_bda = bool(buffer_ci.usage & vk::BufferUsageFlagBits::eShaderDeviceAddress);
+    if (emulate_sparse) {
+        // bbport: no sparse binding on this driver: the arena is an ordinary buffer with its
+        // own memory, allocated like a device local one.
+        mem_type = MemoryType::DeviceLocal;
+    }
     if (mem_type != MemoryType::Sparse) {
         const VmaAllocationCreateFlags bda_flag =
             with_bda ? VMA_ALLOCATION_CREATE_DEDICATED_MEMORY_BIT : 0;
@@ -236,7 +241,8 @@ Buffer::Buffer(const Vulkan::Instance& instance, VAddr cpu_addr_, u64 size_bytes
         buffer_ci.pQueueFamilyIndices = families.data();
     }
     VmaAllocationInfo alloc_info{};
-    buffer.Create(buffer_ci, mem_type, &alloc_info);
+    buffer.Create(buffer_ci, mem_type, &alloc_info,
+                  mem_type == MemoryType::Sparse && !instance.IsSparseBufferSupported());
 
     const auto device = instance.GetDevice();
     if (buffer.bda_addr) {

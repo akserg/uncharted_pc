@@ -177,6 +177,11 @@ private:
 
     const Buffer* GetArena(u64 first_block, u64 last_block);
 
+    /// bbport: plain (non-sparse) arenas only: moves the resident blocks in [base_block,
+    /// end_block) from the arenas that own them to `new_arena` (GPU copy) and points their BDA
+    /// page table entries at it. Called before `address_space` is updated.
+    void MigrateArena(const Buffer* new_arena, u64 base_block, u64 end_block);
+
     void EnsureResident(const Buffer* arena, u64 first_block, u64 last_block);
 
     void DownloadMemory(const Buffer* arena, VAddr device_addr, u64 size);
@@ -259,6 +264,9 @@ private:
     u64 arena_page_size{u64{1} << MAX_ARENA_PAGE_BITS};
     u64 num_arena_pages{u64{1} << (ADDRESS_SPACE_BITS - MAX_ARENA_PAGE_BITS)};
     std::deque<Buffer> arenas;
+    /// bbport: arenas are sparse-resident buffers bound to chunks of memory (Instance::
+    /// IsSparseBufferSupported); false: ordinary buffers with their own memory.
+    bool sparse_arenas{true};
     std::vector<ArenaBinds> pending_binds;
     Vulkan::Semaphore memory_semaphore;
 
