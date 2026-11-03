@@ -65,6 +65,12 @@ public:
         return !forced_off && features.sparseBinding && features.sparseResidencyBuffer;
     }
 
+    /// bbport (macOS, M5 A5): VK_EXT_robustness2 nullDescriptor. Always true elsewhere (asserted at
+    /// device creation); false on MoltenVK, where the rasterizer binds dummies (vk_null_resources.h).
+    bool IsNullDescriptorSupported() const {
+        return null_descriptor;
+    }
+
     /// Largest VkBuffer the driver allows (2 GiB on AMD's Windows driver).
     u64 GetMaxBufferSize() const {
         return vk13_props.maxBufferSize;
@@ -553,6 +559,7 @@ private:
     vk::PhysicalDeviceVulkan13Properties vk13_props;
     vk::PhysicalDevicePushDescriptorPropertiesKHR push_descriptor_props;
     vk::PhysicalDeviceFeatures features;
+    bool null_descriptor{true};
     vk::PhysicalDeviceVulkan12Features vk12_features;
     vk::PhysicalDeviceVulkan13Features vk13_features;
     vk::PhysicalDeviceExtendedDynamicState3FeaturesEXT dynamic_state_3_features;

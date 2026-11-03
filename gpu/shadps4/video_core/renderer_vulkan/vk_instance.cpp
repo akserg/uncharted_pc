@@ -310,6 +310,7 @@ bool Instance::CreateDevice() {
     const bool null_descriptor_supported = robustness2_features.nullDescriptor;
     LOG_WARNING(Render_Vulkan, "robustness2: robustBufferAccess2={} robustImageAccess2={} nullDescriptor={}",
                 robust_buffer_access2, robust_image_access2, null_descriptor_supported);
+    null_descriptor = null_descriptor_supported;
 #else
     ASSERT_MSG(robustness2_features.robustBufferAccess2,
                "Required Vulkan feature unavailable: robustBufferAccess2");

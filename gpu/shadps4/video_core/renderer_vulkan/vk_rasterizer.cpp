@@ -202,6 +202,11 @@ Rasterizer::Rasterizer(const Instance& instance_, Scheduler& scheduler_, Runtime
       guest_markers_enabled{EmulatorSettings.IsVkGuestMarkersEnabled()} {
     // Before the rasterizer is bound: Liverpool enqueues buffers only once it sees it.
     draw_prep = std::make_unique<DrawPreparation>(pipeline_cache);
+#ifdef __APPLE__
+    if (!instance.IsNullDescriptorSupported()) {
+        null_resources = std::make_unique<NullResources>(instance, scheduler);
+    }
+#endif
     scene_targets = std::make_unique<SceneTargets>(instance, scheduler, runtime, texture_cache);
     // Object motion first: it fixes the buffer addresses the motion shader variants embed.
     object_motion = std::make_unique<ObjectMotion>(instance, scheduler);
@@ -2821,10 +2826,21 @@ void Rasterizer::ResolveVertexBuffers(const GraphicsPipeline* pipeline,
             host_offsets.push_back(host_buffer_info->offset + buffer.base_address -
                                    host_buffer_info->base_address);
         } else {
+#ifdef __APPLE__
+            host_buffers.emplace_back(NullBuffer<0>("vertex buffer"));
+#else
             host_buffers.emplace_back(VK_NULL_HANDLE);
+#endif
             host_offsets.push_back(0);
         }
+#ifdef __APPLE__
+        // The null-buffer stand-in is NullResources::BufferSize long.
+        host_sizes.push_back(null_resources && host_buffers.back() == null_resources->Buffer()
+                                 ? std::min<u64>(buffer.GetSize(), NullResources::BufferSize)
+                                 : buffer.GetSize());
+#else
         host_sizes.push_back(buffer.GetSize());
+#endif
         host_strides.push_back(buffer.GetStride());
     }
 
@@ -3140,7 +3156,11 @@ void Rasterizer::BindBuffers(const Shader::Info& stage, const PreparedStage* pre
                 // Permutations compiled without enabled planes never read the buffer, so the
                 // declared binding is satisfied with a null descriptor instead of a copy.
                 if (Regs().clipper_control.user_clip_plane_enable == 0) {
+#ifdef __APPLE__
+                    buffer_infos.emplace_back(NullBuffer<1>("clip-plane buffer"), 0, VK_WHOLE_SIZE);
+#else
                     buffer_infos.emplace_back(VK_NULL_HANDLE, 0, VK_WHOLE_SIZE);
+#endif
                 } else {
                     auto& vk_buffer = buffer_cache.GetStreamBuffer();
                     std::array<float, AmdGpu::NUM_CLIP_PLANES * 4> planes{};
@@ -3198,7 +3218,11 @@ void Rasterizer::BindBuffers(const Shader::Info& stage, const PreparedStage* pre
                                      memory->ClampRangeSize(vsharp.base_address, vsharp.GetSize()));
             }
             if (vsharp.base_address == 0 || vsharp.GetSize() == 0) {
+#ifdef __APPLE__
+                buffer_infos.emplace_back(NullBuffer<2>("buffer with zero address/size"), 0, VK_WHOLE_SIZE);
+#else
                 buffer_infos.emplace_back(VK_NULL_HANDLE, 0, VK_WHOLE_SIZE);
+#endif
             } else {
                 const u64 size = memory->ClampRangeSize(vsharp.base_address, vsharp.GetSize());
                 if (size != vsharp.GetSize()) {
@@ -3406,6 +3430,9 @@ void Rasterizer::BindTextures(const Shader::Info& stage, const PreparedStage* pr
         return;
     }
     image_bindings.clear();
+#ifdef __APPLE__
+    null_image_views.clear();
+#endif
     image_binding_entries.clear();
     image_desc_overflow.clear();
     image_desc_storage.clear();
@@ -3435,6 +3462,9 @@ void Rasterizer::BindTextures(const Shader::Info& stage, const PreparedStage* pr
         const auto num_fmt = tsharp.GetNumberFmt();
         if (tsharp.Address() == 0 || data_fmt == AmdGpu::DataFormat::FormatInvalid) {
             image_bindings.emplace_back(VideoCore::ImageId{}, &image_desc_storage.emplace_back());
+#ifdef __APPLE__
+            NoteNullImageBinding(image_desc, tsharp);
+#endif
             image_binding_entries.push_back(nullptr);
             binding_proxy_ok.push_back(false);
             image_descriptor_array_sizes.push_back(1);
@@ -3449,6 +3479,9 @@ void Rasterizer::BindTextures(const Shader::Info& stage, const PreparedStage* pr
                         tsharp.Address(), tsharp.pitch, tsharp.width, static_cast<u32>(data_fmt),
                         static_cast<u32>(num_fmt));
             image_bindings.emplace_back(VideoCore::ImageId{}, &image_desc_storage.emplace_back());
+#ifdef __APPLE__
+            NoteNullImageBinding(image_desc, tsharp);
+#endif
             image_binding_entries.push_back(nullptr);
             binding_proxy_ok.push_back(false);
             image_descriptor_array_sizes.push_back(1);
@@ -3555,7 +3588,15 @@ void Rasterizer::BindTextures(const Shader::Info& stage, const PreparedStage* pr
         const auto& desc = *desc_ptr;
         bool is_storage = desc.type == VideoCore::TextureCache::BindingType::Storage;
         if (!image_id) {
+#ifdef __APPLE__
+            image_infos.emplace_back(VK_NULL_HANDLE,
+                                     binding_index < null_image_views.size()
+                                         ? null_image_views[binding_index]
+                                         : vk::ImageView{},
+                                     vk::ImageLayout::eGeneral);
+#else
             image_infos.emplace_back(VK_NULL_HANDLE, VK_NULL_HANDLE, vk::ImageLayout::eGeneral);
+#endif
         } else {
             if (auto& old_image = texture_cache.GetImage(image_id);
                 old_image.binding.needs_rebind) {
@@ -3785,7 +3826,16 @@ bool Rasterizer::BindTexturesFromSet(const Shader::Info& stage, const PreparedSt
     for (u32 i = 0; i < count; ++i) {
         const auto& entry = set.entries[i];
         if (!entry.id) {
+#ifdef __APPLE__
+            if (null_resources) {
+                NoteNullUse<5>("sampled image (memoized texture set)");
+            }
+            image_infos.emplace_back(VK_NULL_HANDLE,
+                                     NullImageView(stage.images[i], prepared->image_sharps[i]),
+                                     vk::ImageLayout::eGeneral);
+#else
             image_infos.emplace_back(VK_NULL_HANDLE, VK_NULL_HANDLE, vk::ImageLayout::eGeneral);
+#endif
             continue;
         }
         texture_cache.MarkFound(entry.id);

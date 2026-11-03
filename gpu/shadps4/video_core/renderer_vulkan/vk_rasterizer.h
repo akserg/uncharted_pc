@@ -20,6 +20,9 @@
 #include "video_core/renderer_vulkan/vk_temporal_upscaler.h"
 #include "video_core/renderer_vulkan/vk_pipeline_cache.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
+#ifdef __APPLE__
+#include "video_core/renderer_vulkan/vk_null_resources.h"
+#endif
 #include "video_core/texture_cache/texture_cache.h"
 
 namespace AmdGpu {
@@ -441,6 +444,46 @@ private:
         return CachedImageDescEntry(sharp, res).desc;
     }
     boost::container::static_vector<ImageBindingInfo, Shader::NUM_IMAGES> image_bindings;
+#ifdef __APPLE__
+    // bbport (macOS, M5 A5): dummies for null descriptors when the driver lacks nullDescriptor
+    // (null otherwise), and the dummy view chosen for each null entry of image_bindings.
+    std::unique_ptr<NullResources> null_resources;
+    boost::container::static_vector<vk::ImageView, Shader::NUM_IMAGES> null_image_views;
+    vk::ImageView NullImageView(const Shader::ImageResource& res, const AmdGpu::Image& sharp) const {
+        return null_resources
+                   ? null_resources->ImageView(sharp.GetViewType(res.is_array),
+                                               AmdGpu::GetNumberClass(sharp.GetNumberFmt()),
+                                               res.is_depth, res.is_written)
+                   : vk::ImageView{};
+    }
+    void NoteNullImageBinding(const Shader::ImageResource& res, const AmdGpu::Image& sharp) {
+        null_image_views.resize(image_bindings.size());
+        null_image_views.back() = NullImageView(res, sharp);
+        if (null_resources) {
+            if (res.is_written) {
+                NoteNullUse<3>("storage image (null/invalid T#)");
+            } else {
+                NoteNullUse<4>("sampled image (null/invalid T#)");
+            }
+        }
+    }
+    template <int Site>
+    vk::Buffer NullBuffer(const char* name) const {
+        if (!null_resources) {
+            return {};
+        }
+        NoteNullUse<Site>(name);
+        return null_resources->Buffer();
+    }
+    /// Logs the first use of each null-descriptor stand-in site (one line per site).
+    template <int Site>
+    static void NoteNullUse(const char* name) {
+        static std::atomic_bool seen{false};
+        if (!seen.load(std::memory_order_relaxed) && !seen.exchange(true)) {
+            std::printf("Null descriptor stand-in first used: %s\n", name);
+        }
+    }
+#endif
     struct VertexBinds {
         VertexInputs<vk::VertexInputAttributeDescription2EXT> attributes;
         VertexInputs<vk::VertexInputBindingDescription2EXT> bindings;
