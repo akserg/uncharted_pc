@@ -179,7 +179,7 @@ void Menu() {
                             ImGuiCond_Appearing);
     ImGui::SetNextWindowSize(ImVec2(620.0f * base_scale, 0.0f), ImGuiCond_Appearing);
     bool keep_open = true;
-    if (!ImGui::Begin("Uncharted — settings  (Insert / L3+R3)", &keep_open,
+    if (!ImGui::Begin("Uncharted — settings  (Insert / F10 / L3+R3)", &keep_open,
                       ImGuiWindowFlags_NoCollapse)) {
         ImGui::End();
         return;
@@ -719,7 +719,7 @@ void Init(const Vulkan::Instance& instance, vk::Format format, u32 image_count) 
         return;
     }
     initialized = true;
-    std::printf("Overlay: menu ready (Insert or L3+R3)\n");
+    std::printf("Overlay: menu ready (Insert, F10 or L3+R3)\n");
 }
 
 void UpdateTextInput(SDL_Window* window) {
@@ -748,9 +748,15 @@ bool HandleEvent(const SDL_Event& event) {
     case SDL_EVENT_KEY_DOWN:
     case SDL_EVENT_KEY_UP: {
         const bool down = event.type == SDL_EVENT_KEY_DOWN;
-        if (down && !event.key.repeat &&
-            (event.key.key == SDLK_INSERT || (is_open && event.key.key == SDLK_ESCAPE))) {
-            SetOpen(event.key.key == SDLK_INSERT ? !is_open : false);
+#ifdef __APPLE__
+        // bbport (macOS, M5): MacBook keyboards have no Insert; F10 (fn+F10 unless "use F1, F2 etc. as standard function
+        // keys" is on) opens the menu too.
+        const bool toggle_key = event.key.key == SDLK_INSERT || event.key.key == SDLK_F10;
+#else
+        const bool toggle_key = event.key.key == SDLK_INSERT;
+#endif
+        if (down && !event.key.repeat && (toggle_key || (is_open && event.key.key == SDLK_ESCAPE))) {
+            SetOpen(toggle_key ? !is_open : false);
             return true;
         }
         if (!is_open) {

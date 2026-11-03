@@ -245,6 +245,13 @@ bool WindowSDL::PollEvents() {
         if (event.type == SDL_EVENT_KEY_DOWN && event.key.key == SDLK_F8 && !event.key.repeat) {
             BbPerfLog::Mark();
         }
+        // BB_KEY_LOG=1: every key press the window receives is logged (to see whether fn+F8 / F10 reach SDL at all;
+        // media keys, which a MacBook sends for a bare F8 / F10, never do).
+        static const bool key_log = [] { const char* e = std::getenv("BB_KEY_LOG"); return e && e[0] == '1'; }();
+        if (key_log && event.type == SDL_EVENT_KEY_DOWN && !event.key.repeat) {
+            std::printf("KEY: %s (scancode %d)\n", SDL_GetKeyName(event.key.key), static_cast<int>(event.key.scancode));
+            std::fflush(stdout);
+        }
 #endif
         // The controller finishes the text dialog too: Cross (A) accepts, Circle (B) cancels.
         if (text_active && event.type == SDL_EVENT_GAMEPAD_BUTTON_DOWN &&
