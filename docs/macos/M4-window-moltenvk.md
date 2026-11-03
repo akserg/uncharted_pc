@@ -331,3 +331,24 @@ No `#ifdef __APPLE__` was added inside the buffer cache.
 - KosmicKrisp: drop it as a target for the x86_64-under-Rosetta design (MoltenVK it is), or invest in an x86_64 Mesa build?
 - Is the memory cost acceptable (arenas committed in full)? A lazy alternative needs host-pointer import which MoltenVK lacks.
 - Grant Screen Recording to the terminal (Claude Code host) if real window screenshots are wanted for M5.
+
+### Review of M4b (Opus 5.5, 2026-11-03)
+
+**M4 accepted** (MoltenVK). U1: language select → title → START menu → New Game → first 3D cutscene, no
+assert/crash/device loss. Correction recorded: KosmicKrisp in SDK 1.4.363 is arm64-only, so it was never a
+candidate for this x86_64-under-Rosetta design; the M4 "two devices" came from an arm64 vulkaninfo.
+
+Decisions:
+1. **KosmicKrisp: dropped** for this design. An x86_64 Mesa build is a separate project with no clear payoff.
+   It becomes relevant again only for a future native arm64 port. Consequence: MoltenVK lacks `nullDescriptor`
+   and `robustBufferAccess2`; M5 audits null-descriptor uses (see M5 tasks).
+2. **Full arena commit: accepted** with 1 GiB arena pages (graphics 4.8–6.0 GB, process 8.7 GB at START).
+   The 24 GB hardware floor in README stands and M5 re-measures in gameplay; 16 GB Macs are declared
+   unsupported unless M5 shows otherwise. `BB_ARENA_PAGE_BITS` stays as the knob.
+3. **Window screenshots**: owner grants Screen Recording to the app hosting the agent's shell; `BB_DUMP_FRAME`
+   stays as a fallback.
+4. Linux regression for the shared-file changes (`buffer_cache`, `buffer.cpp`, `vk_instance`, `runtime_file.c`):
+   reviewer re-runs the Linux build + tests from the pushed branch.
+
+Carried into M5 (unverified in M4b): `MigrateArena`, `LowerWave64BallotPass` on a real ballot shader, compute
+correctness, visuals checked in the real window.
