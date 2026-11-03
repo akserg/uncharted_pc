@@ -116,7 +116,7 @@ BufferCache::BufferCache(const Vulkan::Instance& instance_, Vulkan::Scheduler& s
         arena_page_bits = MIN_ARENA_PAGE_BITS;
         if (const char* env = std::getenv("BB_ARENA_PAGE_BITS")) {
             arena_page_bits = std::clamp<u64>(std::strtoull(env, nullptr, 10),
-                                              MIN_ARENA_PAGE_BITS, MAX_ARENA_PAGE_BITS);
+                                              MIN_FORCED_ARENA_PAGE_BITS, MAX_ARENA_PAGE_BITS);
         }
     }
     while (arena_page_bits > MIN_ARENA_PAGE_BITS &&

@@ -50,7 +50,15 @@ class BufferCache {
     // Windows driver: 2 GiB); an arena spans up to two pages, so they shrink to half the limit.
     static constexpr u64 MAX_ARENA_PAGE_BITS = 32;
     static constexpr u64 MIN_ARENA_PAGE_BITS = 30;
-    static constexpr u64 MAX_ARENA_PAGES = u64{1} << (ADDRESS_SPACE_BITS - MIN_ARENA_PAGE_BITS);
+#ifdef __APPLE__
+    // bbport (macOS, M5 A3): BB_ARENA_PAGE_BITS may go down to 24 (16 MiB pages) in plain-buffer
+    // mode, so that requests straddle arena pages and MigrateArena runs (test knob only).
+    static constexpr u64 MIN_FORCED_ARENA_PAGE_BITS = 24;
+#else
+    static constexpr u64 MIN_FORCED_ARENA_PAGE_BITS = MIN_ARENA_PAGE_BITS;
+#endif
+    static constexpr u64 MAX_ARENA_PAGES = u64{1}
+                                           << (ADDRESS_SPACE_BITS - MIN_FORCED_ARENA_PAGE_BITS);
     static constexpr u64 MIN_BLOCK_SIZE = 16_KB;
 
 public:
