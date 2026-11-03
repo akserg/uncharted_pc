@@ -9,6 +9,9 @@
 #include <time.h>
 #include "bbport_copy.h"
 #include "bbport_toggles.h"
+#ifdef __APPLE__
+#include "bbport_perf_log.h"
+#endif
 #include <cstdio>
 #include <boost/preprocessor/stringize.hpp>
 
@@ -127,6 +130,9 @@ void Liverpool::Process(std::stop_token stoken) {
     if (clockid_t clock; pthread_getcpuclockid(pthread_self(), &clock) == 0) {
         BbStats::gpu_thread_clock.store(static_cast<int>(clock));
     }
+#endif
+#ifdef __APPLE__
+    BbPerfLog::RegisterGpuThread(); // bbport (macOS): BB_PERF_LOG GPU-thread CPU share
 #endif
     gpu_id = std::this_thread::get_id();
 #if defined(__linux__) || defined(_WIN32) || defined(__APPLE__)
