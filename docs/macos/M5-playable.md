@@ -245,3 +245,18 @@ U2 and U3 were scanned on their prepared `boot-linked.bin` only; they were **not
 2. The offset-table patch is U1-only in practice; if U2/U3 are run, check the log for the two `MACOS:` lines and any WARNING (U2/U3 may have the memory-area cursor but no offset table).
 3. F8 not confirmed on a keyboard (see above).
 4. Footprint 11.5 GB in gameplay: a 16 GB Mac is still doubtful; the A3 16 MiB-arena option is still a pending owner decision.
+
+### Review of triage round 1 (Opus 5.5, 2026-11-03)
+
+Accepted. Root cause confirmed by disassembly: `GenericOffsetTable` entry 1 is initialised with the constant
+base `0x1000000000` (image+0x7e16c), which the M4 cursor patch didn't move. `patch_offset_table_base()` is
+signature-checked, logged and Apple-only; U2/U3 have no `GenericOffsetTable`, so they need nothing.
+
+Decisions:
+1. **Performance: measure in the owner's session, no optimisation yet.** First gameplay seconds: 35–58 fps,
+   GPU-command-thread CPU 41–81 %, footprint ~11.5 GB. If the owner's session confirms the GPU command thread
+   as the bottleneck, optimisation becomes its own milestone after M5 (M5 stays "playable + measured").
+   16 GB Macs: unsupported (README floor 24 GB stands).
+2. **16 MiB arenas: no**, until old arenas are freed after a merge (leak risk).
+3. **Save data**: the owner's `user/` is the real play profile; writes there are expected. The owner backs up
+   `user/savedata` before each session (PLAYTEST step).
