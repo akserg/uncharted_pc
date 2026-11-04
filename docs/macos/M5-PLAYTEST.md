@@ -30,6 +30,7 @@ BB_GPU_ID=0 BB_PERF_LOG=1 BB_GPU_CHECKPOINTS=1 BB_GAME_DIR=/Users/akserg/Project
 | Settings overlay | **F10** (fn+F10 on a MacBook) or Insert | **L3 + R3 together** |
 | Free the mouse pointer | hold Left Option (Alt) | |
 | **Mark this spot in the log** | **F8** (fn+F8 on a MacBook; if no `MARK` line shows up, see below) | |
+| **Re-centre the sticks** (a stick that rests off centre) | **F9** (fn+F9 on a MacBook) | **View (Back) + right-stick click, held 1 s** |
 
 **F8/F10 on a MacBook:** a bare F8/F10 is a media key (play/pause, mute) that the game never sees. Either hold fn,
 or switch on System Settings → Keyboard → "Use F1, F2, etc. keys as standard function keys". To check which keys
@@ -92,3 +93,23 @@ grep -E 'gamepad backend|PAD:' user/last_run.log | head
 Write down for each: the `gamepad backend` line, the `PAD:` line at rest (`sent` must be `128 128 128 128`), whether
 the camera creeps, whether the LED stops blinking, whether vibration and every button work.
 
+
+## Stick rest-centre calibration (triage round 4)
+For a stick that rests off centre (your right stick sometimes rests about 72 % up). The port learns the rest
+position and corrects for it; full deflection still reaches the full range.
+- **Automatic**: `BB_STICK_AUTOCENTER=1` (the default on macOS, `0` switches it off). In the first 2 s after
+  `gamepad connected`, **leave the sticks alone**: a stick holding one steady value outside its deadzone becomes its
+  centre (log: `Runtime: stick centre recalibrated: left (x,y) right (x,y) (auto)`). If you touch a stick during
+  those 2 s it is not calibrated.
+- **On demand** (the rest point moves while you play): leave the sticks resting and press **F9** (fn+F9 on a MacBook),
+  or hold **View + right-stick click** for 1 s (the two buttons do nothing in the game meanwhile). Log:
+  `Runtime: stick centre recalibrated: left (x,y) right (x,y)`. A stick that is at rest at its true centre
+  (inside the deadzone) goes back to centre (0,0). F9 is also the pad recorder's key: with `BB_PAD_RECORD` set it
+  keeps that job and the recentre key is off (use the chord).
+- **Automatic release**: if the stick later rests at the true centre for 3 s, the correction is dropped
+  (`Runtime: stick centre reset (stick returned to centre)`).
+- A rest point beyond 85 % of the range is refused (log says why).
+- `BB_PAD_LOG=1` shows the centre in each `PAD:` line (`centre r=(x,y) l=(x,y)`).
+
+Check: run with `BB_PAD_LOG=1`, leave the sticks alone 10 s, then `grep -E 'stick centre|PAD:' user/last_run.log`.
+`sent` must be `128 128 128 128` with the camera still. With a healthy stick there is no `centre` log line.

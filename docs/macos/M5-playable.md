@@ -345,3 +345,28 @@ read 0.000, and the agent's runs read -1. Conclusion: **the controller's right s
 up — a hardware fault (stick not returning to centre), independent of SDL backend and of the port.** No backend
 or mapping change. The owner uses USB-C only (no batteries, no Bluetooth).
 Next: optional rest-centre calibration in the port as a workaround (owner request), see triage round 4.
+
+
+### Triage round 4: stick rest-centre calibration (agent, 2026-11-04)
+
+**Why.** Review of round 3: the owner's right stick intermittently rests ~72 % up (ry = -23630; Chrome Axis 3 = -0.719), and after hard movement rests at -0.636 (stable to 1e-4), so the rest point is stuck but shifts. Hardware fault; the port now learns and corrects the rest centre.
+
+**Change** (`src/runtime_pad.c`, shared file; `PadCal`, `cal_*`, `stick_calibrate*`).
+- Per stick a centre (cx,cy), default (0,0). Before the round-2 deadzone: `v >= c: (v-c)*32767/(32767-c)`, `v < c: (v-c)*32768/(32768+c)`, clamped. Centre (0,0) is the identity (tested for all 65536 values).
+- Re-centre on demand: **F9** or **View + right-stick click held 1 s** (the chord's own buttons are not sent to the game). Only a stick whose raw magnitude exceeds its deadzone gets a new centre; a stick inside its deadzone is at rest and goes to (0,0). Log `Runtime: stick centre recalibrated: left (x,y) right (x,y)`.
+- Auto on connect (`BB_STICK_AUTOCENTER`, default 1 on `__APPLE__`, else 0): the first 2 s after `gamepad connected`; a stick with max-min < 1000 on both axes and a mean outside its deadzone takes the mean (log suffix ` (auto)`); varying values are left alone.
+- Auto-release: raw within the deadzone of the true (0,0) for 3 s while the calibrated centre is set and the corrected output would be a big deflection: centre reset, log `Runtime: stick centre reset (stick returned to centre)`.
+- Refusal above 85 % of full range (magnitude), with a log line.
+- `BB_PAD_LOG=1`: `PAD:` line ends with `| centre r=(x,y) l=(x,y)`.
+- Not touched: keyboard/mouse input, `follow_push`, triggers, scripted/replay paths.
+
+**Deviations from the design.**
+1. **Auto-release threshold is 25 %, not 50 %.** With the owner's centres the 50 % rule can never fire: raw (0,0) with centre -23630 corrects to 42 % (0.636 centre: 39 %), so a cleared fault would leave a permanent ~40 % reverse drift. 25 % (`CAL_RELEASE_FRAC`) catches both. The condition "raw stays inside the deadzone of (0,0) for 3 s" cannot hold at a centre outside the deadzone, so a false release needs a held-still stick.
+2. **F9 is also the pad recorder's key** (`BB_PAD_RECORD`). With `BB_PAD_RECORD` set, F9 keeps recording and the recentre key is off (the chord works). Without it F9 recentres.
+3. A stick inside its deadzone at F9/chord goes to (0,0), not "keeps the old centre" (otherwise a recovered stick could not be reset by hand).
+
+**Tests** (`tests/test_pad.c`): identity at (0,0); centres (0,-23630) and (0,-20840): raw = centre -> 128, -32768 -> 0, 32767 -> 255, monotonic over the whole range, also through the deadzone; auto-centre captures a stable offset and ignores a varying signal and one inside the deadzone; F9 at -20840 moves -23630 to -20840 and a rest reading returns to 0; auto-release after 3 s of (0,0) (not at 2.9 s, not while at the faulty rest, timer restarts when the stick moves); refusal at 29000 (accepted at 27800); a learned centre through the SDL virtual gamepad (rest -> 128, full push -> 255/0). `ROSETTA_ADVERTISE_AVX=1 bash build.sh --test`: 18 PASS, exit 0, -Werror on.
+
+**Owner's controller, U1 to the START menu, `BB_PAD_LOG=1`** (`out/m5-round4-run.log`): `gamepad connected: Xbox Series X Controller`, backend MFi, `PAD: raw lx=0 ly=-1 rx=0 ry=-1 | ... | sent 128 128 128 128 | centre r=(0,0) l=(0,0)`. **No auto-centre line**: the stick rested at 0 during the 2 s window, so there was nothing to capture (the fault is intermittent). The fault path is covered by the tests and the virtual gamepad only; **not exercised on a faulty stick**.
+
+**Not verified.** F9 and the chord were not pressed (the shell cannot send keystrokes or hold buttons); code and unit tests only.

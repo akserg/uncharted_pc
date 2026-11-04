@@ -140,6 +140,63 @@ int main(void) {
         int16_t a,b,c,e; stick_deadzone((int16_t)v,0,dz,&a,&b); stick_deadzone((int16_t)(v+1<32768?v+1:v),0,dz,&c,&e);
         assert(c>=a && b==0 && e==0);
     }
+    /* rest-centre calibration */
+    {
+        /* centre (0,0) is the identity: byte-identical to round 2 */
+        for (int v=-32768; v<32768; v+=7) assert(stick_calibrate_axis(v,0)==v);
+        const int centres[2]={-23630,-20840};
+        for (int ci=0; ci<2; ++ci) {
+            const int c=centres[ci];
+            assert(axis(stick_calibrate_axis(c,c))==128);
+            assert(stick_calibrate_axis(-32768,c)==-32768 && axis(stick_calibrate_axis(-32768,c))==0);
+            assert(stick_calibrate_axis(32767,c)==32767 && axis(stick_calibrate_axis(32767,c))==255);
+            int prev=-40000;
+            for (int v=-32768; v<32768; ++v) { const int o=stick_calibrate_axis(v,c); assert(o>=prev); prev=o; }
+            /* through the deadzone: the faulty rest is exactly centre, a full push still reaches the ends */
+            int16_t a, b;
+            stick_calibrate(0,(int16_t)c,0,c,&a,&b); stick_deadzone(a,b,8689,&a,&b); assert(axis(a)==128 && axis(b)==128);
+            stick_calibrate(0,32767,0,c,&a,&b); stick_deadzone(a,b,8689,&a,&b); assert(axis(b)==255);
+            stick_calibrate(0,-32768,0,c,&a,&b); stick_deadzone(a,b,8689,&a,&b); assert(axis(b)==0);
+        }
+        const int dz2[2]={7849,8689};
+        /* auto-centre: a stable offset is captured, a varying signal is not */
+        PadCal c; uint64_t t=1000000;
+        cal_connect(&c,t); c.auto_state=1;
+        for (int i=0;i<130;++i,t+=16667) { int raw[4]={5,-3,2159+(i&1)*50,-23630+(i%3)}; cal_auto(&c,raw,dz2,t); }
+        assert(c.auto_state==2 && c.cx[0]==0 && c.cy[0]==0);                  /* left at rest: no centre */
+        assert(SDL_abs(c.cx[1]-2184)<=30 && SDL_abs(c.cy[1]+23629)<=2);
+        cal_connect(&c,t); c.auto_state=1;
+        for (int i=0;i<130;++i,t+=16667) { int raw[4]={0,0,0,(i&1)?-23630:-12000}; cal_auto(&c,raw,dz2,t); }
+        assert(c.auto_state==2 && c.cx[1]==0 && c.cy[1]==0);                  /* varying: not calibrated */
+        cal_connect(&c,t); c.auto_state=1;
+        for (int i=0;i<130;++i,t+=16667) { int raw[4]={0,0,100,-800}; cal_auto(&c,raw,dz2,t); }
+        assert(c.cx[1]==0 && c.cy[1]==0);                                     /* stable but inside the deadzone */
+        /* re-centre: -23630 then F9 at -20840 */
+        c.cx[1]=0; c.cy[1]=-23630;
+        { int raw[4]={0,0,0,-20840}; cal_recentre(&c,raw,dz2,""); }
+        assert(c.cx[1]==0 && c.cy[1]==-20840 && c.cx[0]==0 && c.cy[0]==0);    /* the left stick at rest keeps (0,0) */
+        { int raw[4]={0,0,0,0}; cal_recentre(&c,raw,dz2,""); }
+        assert(c.cy[1]==0);                                                   /* at rest again: back to (0,0) */
+        /* auto-release: 3 s of raw (0,0) while the output would be a big deflection */
+        c.cx[1]=0; c.cy[1]=-23630; c.rest_since[1]=0;
+        { int raw[4]={0,0,0,0}; uint64_t u=t;
+          cal_release(&c,raw,dz2,u); assert(c.cy[1]==-23630);
+          cal_release(&c,raw,dz2,u+2900000); assert(c.cy[1]==-23630);
+          cal_release(&c,raw,dz2,u+3000000); assert(c.cx[1]==0 && c.cy[1]==0); }
+        /* ... not while the stick still rests at the faulty point, and a move away restarts the timer */
+        c.cy[1]=-23630;
+        { int rest[4]={0,0,0,-23630}, zero[4]={0,0,0,0}; uint64_t u=t;
+          cal_release(&c,rest,dz2,u); cal_release(&c,rest,dz2,u+5000000); assert(c.cy[1]==-23630);
+          cal_release(&c,zero,dz2,u+6000000); cal_release(&c,rest,dz2,u+8000000);
+          cal_release(&c,zero,dz2,u+8500000); cal_release(&c,zero,dz2,u+11000000); assert(c.cy[1]==-23630);
+          cal_release(&c,zero,dz2,u+11500000); assert(c.cy[1]==0); }
+        /* refusal above 85 % (and just below it accepted) */
+        c.cx[1]=c.cy[1]=0;
+        { int raw[4]={0,0,0,-29000}; cal_recentre(&c,raw,dz2,""); assert(c.cx[1]==0 && c.cy[1]==0); }
+        { int raw[4]={0,0,0,-27800}; cal_recentre(&c,raw,dz2,""); assert(c.cy[1]==-27800); }
+        { int raw[4]={20000,0,0,20000}; cal_recentre(&c,raw,dz2,""); assert(c.cx[0]==20000 && c.cy[1]==20000 && c.cx[1]==0); }
+        c.cx[0]=c.cy[1]=0;
+    }
     /* through the SDL gamepad: untouched stick with a rest offset sends exactly 128 */
     SDL_SetJoystickVirtualAxis(joystick,SDL_GAMEPAD_AXIS_RIGHTX,3000);
     SDL_SetJoystickVirtualAxis(joystick,SDL_GAMEPAD_AXIS_RIGHTY,-2500);
@@ -147,6 +204,19 @@ int main(void) {
     SDL_UpdateJoysticks(); SDL_UpdateGamepads();
     inject(path,"");
     assert(pad_read_state(1,&data)==0 && data.right_x==128 && data.right_y==128 && data.left_x==128);
+    /* a learned centre through the SDL gamepad: the faulty rest sends 128, a full push still reaches 0/255 */
+    cal.auto_state=2; cal.cx[1]=0; cal.cy[1]=-23630;
+    SDL_SetJoystickVirtualAxis(joystick,SDL_GAMEPAD_AXIS_RIGHTX,0);
+    SDL_SetJoystickVirtualAxis(joystick,SDL_GAMEPAD_AXIS_RIGHTY,-23630);
+    SDL_UpdateJoysticks(); SDL_UpdateGamepads();
+    assert(pad_read_state(1,&data)==0 && data.right_x==128 && data.right_y==128);
+    SDL_SetJoystickVirtualAxis(joystick,SDL_GAMEPAD_AXIS_RIGHTY,32767);
+    SDL_UpdateJoysticks(); SDL_UpdateGamepads();
+    assert(pad_read_state(1,&data)==0 && data.right_y==255);
+    SDL_SetJoystickVirtualAxis(joystick,SDL_GAMEPAD_AXIS_RIGHTY,-32768);
+    SDL_UpdateJoysticks(); SDL_UpdateGamepads();
+    assert(pad_read_state(1,&data)==0 && data.right_y==0);
+    cal.cy[1]=0;
     SDL_SetJoystickVirtualAxis(joystick,SDL_GAMEPAD_AXIS_RIGHTX,0);
     SDL_SetJoystickVirtualAxis(joystick,SDL_GAMEPAD_AXIS_RIGHTY,0);
     SDL_SetJoystickVirtualAxis(joystick,SDL_GAMEPAD_AXIS_LEFTX,0);
