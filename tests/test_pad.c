@@ -117,6 +117,40 @@ int main(void) {
     SDL_UpdateJoysticks();
     SDL_UpdateGamepads();
     assert(pad_read_state(1,&data)==0 && data.touch_count==1 && data.touches[0].x==480);
+    /* axis mapping: symmetric ends, exact centre */
+    assert(axis(0)==128 && axis(-32768)==0 && axis(32767)==255);
+    /* scaled radial deadzone */
+    int16_t ox, oy;
+    const int dz=8689;
+    stick_deadzone(0,0,dz,&ox,&oy); assert(ox==0 && oy==0);
+    stick_deadzone(2000,-3000,dz,&ox,&oy); assert(axis(ox)==128 && axis(oy)==128);        /* rest offset */
+    stick_deadzone(-1500,6000,dz,&ox,&oy); assert(axis(ox)==128 && axis(oy)==128);
+    stick_deadzone(8689,0,dz,&ox,&oy); assert(ox==0 && oy==0);                            /* on the edge */
+    stick_deadzone(8690,0,dz,&ox,&oy); assert(ox>=0 && ox<=2);                            /* no jump outside */
+    stick_deadzone(0,-8700,dz,&ox,&oy); assert(ox==0 && oy<=0 && oy>=-20);
+    stick_deadzone(32767,0,dz,&ox,&oy); assert(axis(ox)==255 && axis(oy)==128);           /* full deflection */
+    stick_deadzone(-32768,0,dz,&ox,&oy); assert(axis(ox)==0 && axis(oy)==128);
+    stick_deadzone(0,32767,dz,&ox,&oy); assert(axis(oy)==255);
+    stick_deadzone(0,-32768,dz,&ox,&oy); assert(axis(oy)==0);
+    stick_deadzone(20000,10000,dz,&ox,&oy);                                               /* direction kept */
+    assert(ox>oy && oy>0 && SDL_abs(ox-2*oy)<=2);
+    stick_deadzone(-20000,15000,dz,&ox,&oy); assert(ox<0 && oy>0 && SDL_abs(3*ox+4*oy)<=8);
+    stick_deadzone(3000,-9000,0,&ox,&oy); assert(ox==3000 && oy==-9000);                  /* 0 disables */
+    for (int v=dz+1; v<32768; v+=97) {                                                    /* monotonic */
+        int16_t a,b,c,e; stick_deadzone((int16_t)v,0,dz,&a,&b); stick_deadzone((int16_t)(v+1<32768?v+1:v),0,dz,&c,&e);
+        assert(c>=a && b==0 && e==0);
+    }
+    /* through the SDL gamepad: untouched stick with a rest offset sends exactly 128 */
+    SDL_SetJoystickVirtualAxis(joystick,SDL_GAMEPAD_AXIS_RIGHTX,3000);
+    SDL_SetJoystickVirtualAxis(joystick,SDL_GAMEPAD_AXIS_RIGHTY,-2500);
+    SDL_SetJoystickVirtualAxis(joystick,SDL_GAMEPAD_AXIS_LEFTX,-2000);
+    SDL_UpdateJoysticks(); SDL_UpdateGamepads();
+    inject(path,"");
+    assert(pad_read_state(1,&data)==0 && data.right_x==128 && data.right_y==128 && data.left_x==128);
+    SDL_SetJoystickVirtualAxis(joystick,SDL_GAMEPAD_AXIS_RIGHTX,0);
+    SDL_SetJoystickVirtualAxis(joystick,SDL_GAMEPAD_AXIS_RIGHTY,0);
+    SDL_SetJoystickVirtualAxis(joystick,SDL_GAMEPAD_AXIS_LEFTX,0);
+    SDL_UpdateJoysticks(); SDL_UpdateGamepads();
     SDL_CloseJoystick(joystick);
     if (gamepad) SDL_CloseGamepad(gamepad);
     gamepad=NULL;

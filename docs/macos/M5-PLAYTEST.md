@@ -36,6 +36,13 @@ or switch on System Settings → Keyboard → "Use F1, F2, etc. keys as standard
 reach the game, start with `BB_KEY_LOG=1` in front of the command above: every key press prints a `KEY:` line in
 the log (`grep -E 'KEY:|MARK' user/last_run.log`).
 
+**Stick drift / deadzone.** Sticks have a scaled radial deadzone (left 7849, right 8689 out of 32767), so a
+resting Xbox stick sends exactly centre. Variables (put them in front of the command above):
+- `BB_STICK_DEADZONE_LEFT=n`, `BB_STICK_DEADZONE_RIGHT=n`: 0-32767, 0 turns it off. Raise the right one
+  (e.g. 12000) if the camera still creeps; lower it if the stick feels dead.
+- `BB_PAD_LOG=1`: once a second, `PAD: raw ... | without deadzone ... | sent ...` in the log (sticks untouched:
+  `sent` must be `128 128 128 128`). `grep PAD: user/last_run.log`.
+
 ## What to test
 1. **Chapter 1 end to end.** Press **F8** whenever something odd happens and at each perf spot below.
 2. **Perf spots** (stand still about 20 s at each; press F8 when you arrive, write down which mark is which):

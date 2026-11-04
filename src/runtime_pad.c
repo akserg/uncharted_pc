@@ -72,6 +72,29 @@ static uint8_t connected_count;
 
 static uint64_t now_us(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC,&t); return (uint64_t)t.tv_sec*1000000u+(uint64_t)t.tv_nsec/1000u; }
 static uint8_t axis(int16_t v) { int x=(v+32768)>>8; return (uint8_t)(x<0 ? 0 : x>255 ? 255 : x); }
+/* Scaled radial deadzone for one stick (SDL int16 values, y down like x right): inside the radius
+ * the stick is exactly centre; outside, the distance from the centre is rescaled from
+ * [dz, 32767] to [0, 32767] along the same direction (no jump at the edge, full deflection still
+ * reaches 0/255). dz 0 disables it. Xbox pads rest a few percent off centre; PS4 pads almost exactly
+ * at 128, which is what the game's own small deadzone assumes. */
+#define STICK_DEADZONE_LEFT 7849   /* XInput recommended, out of 32767 */
+#define STICK_DEADZONE_RIGHT 8689
+static void stick_deadzone(int16_t x, int16_t y, int dz, int16_t *ox, int16_t *oy) {
+    *ox=x; *oy=y;
+    if (dz<=0) return;
+    const double mag=SDL_sqrt((double)x*x+(double)y*y);
+    if (mag<=(double)dz) { *ox=*oy=0; return; }
+    double scaled=(mag-dz)/(32767.0-dz)*32767.0;
+    if (scaled>32767.0) scaled=32767.0;
+    const double k=scaled/mag;
+    *ox=(int16_t)SDL_lround(x*k); *oy=(int16_t)SDL_lround(y*k);
+}
+static int stick_deadzone_setting(const char *name, int fallback) {
+    const char *v=getenv(name);
+    if (!v || !*v) return fallback;
+    const int n=atoi(v);
+    return n<0 ? 0 : n>32767 ? 32767 : n;
+}
 static uint8_t trigger(int16_t v) { int x=v>>7; return (uint8_t)(x<0 ? 0 : x>255 ? 255 : x); }
 static uint16_t touch_axis(float v, int max) {
     return (uint16_t)(v<=0.0f ? 0 : v>=1.0f ? max : (int)(v*max+0.5f));
@@ -884,8 +907,28 @@ static void sample_host(PadData *d) {
         if (SDL_GetGamepadButton(g,SDL_GAMEPAD_BUTTON_TOUCHPAD)) d->buttons|=BTN_TOUCHPAD; /* DualSense/DS4 click */
         if ((d->buttons & BTN_L2) && !d->l2) d->l2=255;
         if ((d->buttons & BTN_R2) && !d->r2) d->r2=255;
-        d->left_x=axis(SDL_GetGamepadAxis(g,SDL_GAMEPAD_AXIS_LEFTX)); d->left_y=axis(SDL_GetGamepadAxis(g,SDL_GAMEPAD_AXIS_LEFTY));
-        d->right_x=axis(SDL_GetGamepadAxis(g,SDL_GAMEPAD_AXIS_RIGHTX)); d->right_y=axis(SDL_GetGamepadAxis(g,SDL_GAMEPAD_AXIS_RIGHTY));
+        static int dz_left=-1, dz_right, pad_log=-1;
+        if (dz_left<0) {
+            dz_left=stick_deadzone_setting("BB_STICK_DEADZONE_LEFT",STICK_DEADZONE_LEFT);
+            dz_right=stick_deadzone_setting("BB_STICK_DEADZONE_RIGHT",STICK_DEADZONE_RIGHT);
+            pad_log=getenv("BB_PAD_LOG") && getenv("BB_PAD_LOG")[0]=='1';
+            printf("Runtime: stick deadzone left %d right %d (of 32767; BB_STICK_DEADZONE_LEFT/RIGHT, 0 = off)\n",dz_left,dz_right);
+        }
+        const int16_t rlx=SDL_GetGamepadAxis(g,SDL_GAMEPAD_AXIS_LEFTX), rly=SDL_GetGamepadAxis(g,SDL_GAMEPAD_AXIS_LEFTY);
+        const int16_t rrx=SDL_GetGamepadAxis(g,SDL_GAMEPAD_AXIS_RIGHTX), rry=SDL_GetGamepadAxis(g,SDL_GAMEPAD_AXIS_RIGHTY);
+        int16_t clx, cly, crx, cry;
+        stick_deadzone(rlx,rly,dz_left,&clx,&cly);
+        stick_deadzone(rrx,rry,dz_right,&crx,&cry);
+        d->left_x=axis(clx); d->left_y=axis(cly); d->right_x=axis(crx); d->right_y=axis(cry);
+        if (pad_log) {
+            static uint64_t pad_log_us;
+            if (d->timestamp-pad_log_us>=1000000) {
+                pad_log_us=d->timestamp;
+                printf("PAD: raw lx=%d ly=%d rx=%d ry=%d | without deadzone %u %u %u %u | sent %u %u %u %u\n",
+                       rlx,rly,rrx,rry,axis(rlx),axis(rly),axis(rrx),axis(rry),
+                       d->left_x,d->left_y,d->right_x,d->right_y);
+            }
+        }
         if (input.pad_invert_y) d->right_y=(uint8_t)(255-d->right_y);
         if (SDL_GetNumGamepadTouchpads(g)>0) {
             const int fingers=SDL_GetNumGamepadTouchpadFingers(g,0);

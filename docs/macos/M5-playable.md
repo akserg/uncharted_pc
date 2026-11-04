@@ -278,3 +278,27 @@ Decisions:
   the GPU command thread (translated by Rosetta) is the likely limit.
 - Memory: footprint rises from 6.9 GB (START) to **12.9 GB** in gameplay.
 - Audio, Bluetooth controller, chapter-1 completion: not reported yet.
+
+### Triage round 2: stick drift (agent, 2026-11-04)
+
+**Report.** The third-person camera creeps upward with the sticks untouched. The reviewer's analysis was verified in the code: `axis()` (`src/runtime_pad.c`) mapped the SDL int16 straight to a byte (`(v+32768)>>8`) with no deadzone, and `scePadGetControllerInformation` reports `dead_zone_left/right = 2`. An Xbox stick resting 2-4 % off centre therefore reached the game as, e.g., rest 1500 -> byte 133 (centre 128); a small constant right-stick Y offset moves the camera forever. (Arithmetic from the formula, not a measurement.)
+
+**Measurement (Step 2). Not obtained.** `BB_PAD_LOG=1` was added and U1 was run for ~115 s (fresh scratch `BB_USER_DIR`, log `out/m5-drift-run.log`), but **no gamepad was connected to the machine at that time** (`pad opened` but no `gamepad connected` line, so no `PAD:` lines). The rest values of the owner's controller are still to be recorded: see the command below.
+
+**Change** (`src/runtime_pad.c`, shared file, all platforms, on by default).
+- `stick_deadzone()`: scaled radial deadzone per stick on the SDL int16 values before `axis()`. Distance from the centre <= dz -> exactly (0,0) -> bytes 128/128. Beyond it the distance is rescaled from [dz, 32767] to [0, 32767] along the same direction (no jump at the edge; the radius is clamped to 32767, so full deflection still gives 0/255 and the direction is kept in the corners).
+- Defaults: left 7849, right 8689 (XInput recommended, out of 32767). `BB_STICK_DEADZONE_LEFT` / `BB_STICK_DEADZONE_RIGHT` override (0-32767, 0 disables). The values in use are logged once: `Runtime: stick deadzone left .. right ..`.
+- `BB_PAD_LOG=1`: once per second while a gamepad is connected, `PAD: raw lx= ly= rx= ry= | without deadzone a b c d | sent a b c d` (raw int16, the bytes the old code sent, the bytes sent now).
+- `axis()` is unchanged: confirmed symmetric (0 -> 128, -32768 -> 0, 32767 -> 255); asserted in the test.
+- Not touched: keyboard/mouse input, the scripted/replay/recorded paths (they override the sticks after this), `follow_push` (writes `right_x` afterwards; its 118..138 window check still sees 128), `dead_zone_* = 2` in the pad info.
+
+**Tests** (`tests/test_pad.c`): axis mapping ends and centre; rest offsets inside the deadzone give 128; exactly at the radius -> centre; one unit outside -> within 2 of centre; full deflection on each axis -> 0/255; diagonal direction kept (2:1 and -3:4 vectors); dz 0 disables; monotonic across the edge; and through an SDL virtual gamepad (right stick resting at 3000/-2500, left at -2000) `scePadReadState` returns 128/128/128. `ROSETTA_ADVERTISE_AVX=1 bash build.sh --test`: all 22 PASS lines, exit 0 (`out/m5-drift-build.log`), -Werror on.
+
+**For the Linux/Windows reviewer.** Shared-file change: `src/runtime_pad.c` (new static functions, 2 env variables, one log) and `tests/test_pad.c`. Not compiled on Linux/Windows here. It uses `SDL_sqrt`/`SDL_lround`, no libm dependency.
+
+**Check in game / measure:**
+```
+BB_PAD_LOG=1 BB_GPU_ID=0 BB_PERF_LOG=1 BB_GAME_DIR=/Users/akserg/Projects/CUSA02344 BB_EXE=u1 ./run.sh
+grep -E 'stick deadzone|PAD:' user/last_run.log | head -20
+```
+Leave the sticks alone for 10 s: `sent` must be `128 128 128 128`, `raw` shows the rest offsets. If the camera still moves, send those lines; try `BB_STICK_DEADZONE_RIGHT=12000` in front of the command.
