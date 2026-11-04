@@ -302,3 +302,38 @@ BB_PAD_LOG=1 BB_GPU_ID=0 BB_PERF_LOG=1 BB_GAME_DIR=/Users/akserg/Projects/CUSA02
 grep -E 'stick deadzone|PAD:' user/last_run.log | head -20
 ```
 Leave the sticks alone for 10 s: `sent` must be `128 128 128 128`, `raw` shows the rest offsets. If the camera still moves, send those lines; try `BB_STICK_DEADZONE_RIGHT=12000` in front of the command.
+
+### Triage round 3: Xbox controller axes on macOS (agent, 2026-11-04)
+
+**Report.** With the sticks untouched the owner's log showed `PAD: raw lx=0 ly=-1 rx=2159 ry=-23630` (constant), while Chrome's gamepad tester over USB-C showed ~0 on every axis. Task: find which SDL backend misreads the right stick.
+
+**Result: not reproduced.** I could not get a wrong axis out of SDL on this machine, in the probe or in the game, with any backend that can see the controller. Nothing in SDL or the mapping was shown to be wrong, so **no backend or mapping change was made** (a change with no evidence behind it would only move the problem; the owner's session ran an unknown backend, see below).
+
+**Tool.** `tools/pad_probe.c` (x86_64, links SDL3 from `$BB_DEPS`; not part of `build.sh`):
+```
+clang -arch x86_64 -mmacosx-version-min=15.4 -std=c11 -O2 -Wall -Wextra -Werror -I$BB_DEPS/include tools/pad_probe.c -L$BB_DEPS/lib -lSDL3 -Wl,-rpath,$BB_DEPS/lib -o out/pad-probe
+out/pad-probe 10 [SDL_HINT_NAME=VALUE ...]     # sticks untouched; hints set before SDL_Init
+```
+It prints name, path, GUID, vid/pid, mapping, every raw axis and the six gamepad axes once a second, with SDL's input log at VERBOSE. SDL reads its hints from environment variables of the same name, so the same hints work on the game: `SDL_JOYSTICK_MFI=0 ./run.sh`.
+
+**Backend table** (Xbox Series X, USB-C, untouched, 4 s each; "RY" = `SDL_GAMEPAD_AXIS_RIGHTY`):
+
+| Hints | Driver in use | GUID / pid | RY at rest | Raw axes at rest | LED | Stick movement |
+|---|---|---|---|---|---|---|
+| none (default) | **MFi (Apple GameController)**; the HIDAPI Xbox driver is `NONE (DISABLED)` | `0500...` / 0b13 | **-1** | a0..a5 = 0 | owner to check | untested |
+| `SDL_JOYSTICK_HIDAPI=0` | MFi | same | -1 | same | owner | untested |
+| `SDL_JOYSTICK_IOKIT=0` | MFi (unchanged) | same | -1 | same | owner | untested |
+| `SDL_JOYSTICK_HIDAPI_XBOX=0` / `..._XBOX_ONE=0` | MFi | same | -1 | same | owner | untested |
+| `SDL_JOYSTICK_MFI=0` | **HIDAPI `XBOX_ONE` driver** (GIP handshake done by SDL) | `0300...` / 0b12 | **0** | a0..a3 = 0, a4 = a5 = -32768 (triggers; the mapping `+a2`/`+a5`... turns them into LT = RT = 0) | owner | untested |
+| `HIDAPI=0` + `MFI=0` | none: **0 joysticks** (the IOKit backend does not see this pad on this Mac) | - | - | - | - | - |
+
+Mapping (MFi): `a:b0,b:b1,x:b6,y:b7,...,leftx:a0,lefty:a1~,rightx:a3,righty:a4~,lefttrigger:+a2,righttrigger:+a5`. Raw axis 4 is the right stick Y and the mapping assigns it correctly. There is no axis that could carry -23630 at rest in either backend: **which raw axis carried it in the owner's run is not known** (the log only has the mapped values: `rx=2159`, `ry=-23630` are the mapped RIGHTX/RIGHTY, i.e. raw a3/a4 under the MFi mapping). The mapping string is not wrong.
+
+**The game, same machine, same controller** (`BB_PAD_LOG=1`, run to the START menu, 68 samples each): default backend `PAD: raw lx=0 ly=-1 rx=0 ry=-1 | ... | sent 128 128 128 128`; with `SDL_JOYSTICK_MFI=0` `raw 0 0 0 0 | sent 128 128 128 128`. So the unmodified code already sends a neutral stick here.
+
+**What is different from the owner's run, and the most likely cause.** The default backend is the GameController framework (MFi), not HIDAPI; it hands SDL float values that the framework updates on its own queue. I could not see any difference from the owner's setup except time: the owner's `-23630` was a constant value across samples, which also fits a stick physically held off-centre or a stale/uncalibrated first report from that framework after a USB-C hot-plug. I cannot tell these apart without a second reading from the owner's machine state; I do not claim a cause.
+
+**Change.** `src/runtime_pad.c` only, all platforms (log only): on connect, `Runtime: gamepad backend <HIDAPI | MFi (Apple GameController) | IOKit/virtual> (vid .. pid .., guid ..)`. The owner's next log therefore says which backend produced any bad value. The round-2 deadzone stays unchanged. `ROSETTA_ADVERTISE_AVX=1 bash build.sh --test`: 18 PASS, exit 0, `-Werror` on.
+
+**Open / for the owner.** Run the checks in `M5-PLAYTEST.md` ("Controller check"). If `ry` is still offset in the default run, send the `gamepad backend` and `PAD:` lines, then try `SDL_JOYSTICK_MFI=0` (HIDAPI; it does the Xbox GIP handshake, so the LED should stop blinking). If HIDAPI is clean and MFi is not, the follow-up is to set `SDL_HINT_JOYSTICK_MFI=0` on Apple in `runtime_pad.c`/`window.cpp` before `SDL_Init`, at the price of rumble and button behaviour needing a recheck, which I could not test (no hands on the stick).
+

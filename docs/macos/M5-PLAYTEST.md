@@ -80,3 +80,15 @@ enough.
 - The list of F8 marks with a few words each (M1 START menu, M2 beach, M3 first combat, plus the others).
 - Whether chapter 1 was completed, and how long the session took.
 - The log of the last (normal) session too: `cp user/last_run.log ~/Desktop/m5-session-$(date +%H%M).log`.
+
+## Controller check (triage round 3)
+Leave the sticks and triggers alone for 10 s at the START menu, then move both sticks, press every button, check
+rumble and look at the LED. Run once per backend:
+```
+BB_PAD_LOG=1 BB_GPU_ID=0 BB_GAME_DIR=/Users/akserg/Projects/CUSA02344 BB_EXE=u1 ./run.sh                          # default (MFi)
+SDL_JOYSTICK_MFI=0 BB_PAD_LOG=1 BB_GPU_ID=0 BB_GAME_DIR=/Users/akserg/Projects/CUSA02344 BB_EXE=u1 ./run.sh      # HIDAPI
+grep -E 'gamepad backend|PAD:' user/last_run.log | head
+```
+Write down for each: the `gamepad backend` line, the `PAD:` line at rest (`sent` must be `128 128 128 128`), whether
+the camera creeps, whether the LED stops blinking, whether vibration and every button work.
+

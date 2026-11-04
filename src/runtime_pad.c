@@ -105,6 +105,22 @@ static void touch_click(PadData *d, int right) {
     d->touches[0]=(PadTouch){.x=right ? 1440 : 480,.y=471,.id=0};
 }
 
+/* Which SDL joystick driver serves the pad: the HIDAPI drivers report a "DevSrvsID:" path, the Apple
+ * GameController (MFi) backend has no path and a Bluetooth-bus GUID (0x05) even on USB. SDL reads its
+ * hints from the environment, so SDL_JOYSTICK_MFI=0 / SDL_JOYSTICK_HIDAPI=0 select a backend without a
+ * rebuild (docs/macos/M5-playable.md, triage round 3). */
+static void log_gamepad_backend(SDL_Gamepad *g) {
+    const char *path=SDL_GetGamepadPath(g);
+    const SDL_GUID guid=SDL_GetJoystickGUID(SDL_GetGamepadJoystick(g));
+    char text[40];
+    SDL_GUIDToString(guid,text,sizeof text);
+    const char *backend="other";
+    if (path && !SDL_strncmp(path,"DevSrvsID:",10)) backend="HIDAPI";
+    else if (!path && guid.data[0]==0x05) backend="MFi (Apple GameController)";
+    else if (!path) backend="IOKit/virtual";
+    printf("Runtime: gamepad backend %s (vid %04x pid %04x, guid %s)\n",backend,SDL_GetGamepadVendor(g),SDL_GetGamepadProduct(g),text);
+}
+
 /* Opens the first gamepad SDL knows about; called under lock. */
 static SDL_Gamepad *current_gamepad(void) {
     if (!sdl_ready) sdl_ready = SDL_WasInit(SDL_INIT_GAMEPAD) ? 1 : SDL_InitSubSystem(SDL_INIT_GAMEPAD) ? 1 : -1;
@@ -115,7 +131,11 @@ static SDL_Gamepad *current_gamepad(void) {
         SDL_JoystickID *ids=SDL_GetGamepads(&count);
         if (ids && count>0) {
             gamepad=SDL_OpenGamepad(ids[0]);
-            if (gamepad) { ++connected_count; printf("Runtime: gamepad connected: %s\n",SDL_GetGamepadName(gamepad)); }
+            if (gamepad) {
+                ++connected_count;
+                printf("Runtime: gamepad connected: %s\n",SDL_GetGamepadName(gamepad));
+                log_gamepad_backend(gamepad);
+            }
         }
         SDL_free(ids);
     }
