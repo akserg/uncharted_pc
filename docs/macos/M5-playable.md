@@ -337,3 +337,11 @@ Mapping (MFi): `a:b0,b:b1,x:b6,y:b7,...,leftx:a0,lefty:a1~,rightx:a3,righty:a4~,
 
 **Open / for the owner.** Run the checks in `M5-PLAYTEST.md` ("Controller check"). If `ry` is still offset in the default run, send the `gamepad backend` and `PAD:` lines, then try `SDL_JOYSTICK_MFI=0` (HIDAPI; it does the Xbox GIP handshake, so the LED should stop blinking). If HIDAPI is clean and MFi is not, the follow-up is to set `SDL_HINT_JOYSTICK_MFI=0` on Apple in `runtime_pad.c`/`window.cpp` before `SDL_Init`, at the price of rumble and button behaviour needing a recheck, which I could not test (no hands on the stick).
 
+
+#### Review of triage round 3 (Opus 5.5, 2026-11-04)
+Owner's second Chrome test (hardwaretester.com/gamepad, USB-C, after re-plugging, sticks untouched):
+**Axis 3 = -0.71929** (Axis 2 0.031) — the same 72 % offset the port logged (`ry=-23630`). An earlier Chrome test
+read 0.000, and the agent's runs read -1. Conclusion: **the controller's right stick intermittently rests ~72 %
+up — a hardware fault (stick not returning to centre), independent of SDL backend and of the port.** No backend
+or mapping change. The owner uses USB-C only (no batteries, no Bluetooth).
+Next: optional rest-centre calibration in the port as a workaround (owner request), see triage round 4.
