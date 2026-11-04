@@ -7,6 +7,8 @@ _Thread_local int runtime_ndgi_open; /* normally defined in runtime_fiber.c; pad
 static int capture;
 static int rumble_calls;
 static uint16_t rumble_low, rumble_high;
+static int f9_request;
+int bbgpu_key_f9_take(void) { const int r=f9_request; f9_request=0; return r; }
 int bbgpu_overlay_captures_input(void) { return capture; }
 void bbgpu_mouse_configure(int look) { (void)look; }
 int bbgpu_mouse_sample(float *dx, float *dy, uint32_t *buttons, int *wheel) {
@@ -159,18 +161,42 @@ int main(void) {
             stick_calibrate(0,-32768,0,c,&a,&b); stick_deadzone(a,b,8689,&a,&b); assert(axis(b)==0);
         }
         const int dz2[2]={7849,8689};
-        /* auto-centre: a stable offset is captured, a varying signal is not */
+        /* stuck-stick detection: 0 for 2 s, then a constant -21015 (+-30 jitter): captured after 3 s, not before */
         PadCal c; uint64_t t=1000000;
         cal_connect(&c,t); c.auto_state=1;
-        for (int i=0;i<130;++i,t+=16667) { int raw[4]={5,-3,2159+(i&1)*50,-23630+(i%3)}; cal_auto(&c,raw,dz2,t); }
-        assert(c.auto_state==2 && c.cx[0]==0 && c.cy[0]==0);                  /* left at rest: no centre */
-        assert(SDL_abs(c.cx[1]-2184)<=30 && SDL_abs(c.cy[1]+23629)<=2);
+        int log_n=0;
+        for (int i=0;i<120;++i,t+=16667) { int raw[4]={0,-1,0,-1}; cal_stuck(&c,raw,dz2,t); }
+        assert(c.cx[1]==0 && c.cy[1]==0);
+        const uint64_t t0=t;
+        for (int i=0;i<300;++i,t+=16667) {
+            int raw[4]={0,-1,-530+(i%4)*10,-21015+(i%3)*20}; cal_stuck(&c,raw,dz2,t);
+            if (t-t0<2900000) assert(c.cy[1]==0);                                /* not before 3 s */
+            if (t-t0>=3000000+16667) { assert(c.cy[1]<=-20975 && c.cy[1]>=-21015 && SDL_abs(c.cx[1]+520)<=20); ++log_n; }
+        }
+        assert(log_n>0 && c.cx[0]==0 && c.cy[0]==0);                              /* left at rest: no centre */
+        /* a human-like hold (+-300 jitter, deflected) is not captured, even after 10 s */
         cal_connect(&c,t); c.auto_state=1;
-        for (int i=0;i<130;++i,t+=16667) { int raw[4]={0,0,0,(i&1)?-23630:-12000}; cal_auto(&c,raw,dz2,t); }
-        assert(c.auto_state==2 && c.cx[1]==0 && c.cy[1]==0);                  /* varying: not calibrated */
+        for (int i=0;i<600;++i,t+=16667) { int raw[4]={0,0,(i&1)?300:-300,-21000+((i/2)&1)*600-300}; cal_stuck(&c,raw,dz2,t); }
+        assert(c.cx[1]==0 && c.cy[1]==0);
+        /* a stick moving at 100 per 0.5 s never reaches 3 s of constancy */
+        for (int i=0;i<600;++i,t+=16667) { int raw[4]={0,0,0,-15000-(i/30)*100}; cal_stuck(&c,raw,dz2,t); }
+        assert(c.cy[1]==0);
+        /* a constant value inside the deadzone: no capture */
         cal_connect(&c,t); c.auto_state=1;
-        for (int i=0;i<130;++i,t+=16667) { int raw[4]={0,0,100,-800}; cal_auto(&c,raw,dz2,t); }
-        assert(c.cx[1]==0 && c.cy[1]==0);                                     /* stable but inside the deadzone */
+        for (int i=0;i<600;++i,t+=16667) { int raw[4]={0,0,100,-800}; cal_stuck(&c,raw,dz2,t); }
+        assert(c.cx[1]==0 && c.cy[1]==0);
+        /* a constant value beyond 85 %: refused (once), nothing adopted */
+        for (int i=0;i<400;++i,t+=16667) { int raw[4]={0,0,0,-29000}; cal_stuck(&c,raw,dz2,t); }
+        assert(c.cy[1]==0);
+        /* detection off (BB_STICK_AUTOCENTER=0) */
+        c.auto_state=2;
+        for (int i=0;i<400;++i,t+=16667) { int raw[4]={0,0,0,-21000}; cal_stuck(&c,raw,dz2,t); }
+        assert(c.cy[1]==0);
+        /* the left stick is detected too, independently */
+        cal_connect(&c,t); c.auto_state=1;
+        for (int i=0;i<300;++i,t+=16667) { int raw[4]={12000,3000,0,0}; cal_stuck(&c,raw,dz2,t); }
+        assert(c.cx[0]==12000 && c.cy[0]==3000 && c.cx[1]==0 && c.cy[1]==0);
+        c.cx[0]=c.cy[0]=0;
         /* re-centre: -23630 then F9 at -20840 */
         c.cx[1]=0; c.cy[1]=-23630;
         { int raw[4]={0,0,0,-20840}; cal_recentre(&c,raw,dz2,""); }
@@ -216,6 +242,34 @@ int main(void) {
     SDL_SetJoystickVirtualAxis(joystick,SDL_GAMEPAD_AXIS_RIGHTY,-32768);
     SDL_UpdateJoysticks(); SDL_UpdateGamepads();
     assert(pad_read_state(1,&data)==0 && data.right_y==0);
+    /* F9 (a window key event) re-centres; so does LB + RB + right-stick click held 1 s, and View + right-stick click */
+    SDL_SetJoystickVirtualAxis(joystick,SDL_GAMEPAD_AXIS_RIGHTY,-20840);
+    SDL_UpdateJoysticks(); SDL_UpdateGamepads();
+    assert(pad_read_state(1,&data)==0 && cal.cy[1]==-23630);
+    f9_request=1;
+    assert(pad_read_state(1,&data)==0 && cal.cy[1]==-20840 && f9_request==0);
+    SDL_SetJoystickVirtualAxis(joystick,SDL_GAMEPAD_AXIS_RIGHTY,-18000);
+    SDL_SetJoystickVirtualButton(joystick,SDL_GAMEPAD_BUTTON_LEFT_SHOULDER,true);
+    SDL_SetJoystickVirtualButton(joystick,SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER,true);
+    SDL_UpdateJoysticks(); SDL_UpdateGamepads();
+    assert(pad_read_state(1,&data)==0 && cal.cy[1]==-20840);                   /* no R3 yet: no chord */
+    SDL_SetJoystickVirtualButton(joystick,SDL_GAMEPAD_BUTTON_RIGHT_STICK,true);
+    SDL_UpdateJoysticks(); SDL_UpdateGamepads();
+    assert(pad_read_state(1,&data)==0 && cal.cy[1]==-20840);                   /* held for less than 1 s */
+    usleep(1100000);
+    assert(pad_read_state(1,&data)==0 && cal.cy[1]==-18000);
+    SDL_SetJoystickVirtualButton(joystick,SDL_GAMEPAD_BUTTON_LEFT_SHOULDER,false);
+    SDL_SetJoystickVirtualButton(joystick,SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER,false);
+    SDL_SetJoystickVirtualAxis(joystick,SDL_GAMEPAD_AXIS_RIGHTY,-16000);
+    SDL_UpdateJoysticks(); SDL_UpdateGamepads();
+    assert(pad_read_state(1,&data)==0 && cal.cy[1]==-18000);                   /* chord released: re-arms */
+    SDL_SetJoystickVirtualButton(joystick,SDL_GAMEPAD_BUTTON_BACK,true);
+    SDL_UpdateJoysticks(); SDL_UpdateGamepads();
+    assert(pad_read_state(1,&data)==0 && cal.cy[1]==-18000);
+    usleep(1100000);
+    assert(pad_read_state(1,&data)==0 && cal.cy[1]==-16000);
+    SDL_SetJoystickVirtualButton(joystick,SDL_GAMEPAD_BUTTON_BACK,false);
+    SDL_SetJoystickVirtualButton(joystick,SDL_GAMEPAD_BUTTON_RIGHT_STICK,false);
     cal.cy[1]=0;
     SDL_SetJoystickVirtualAxis(joystick,SDL_GAMEPAD_AXIS_RIGHTX,0);
     SDL_SetJoystickVirtualAxis(joystick,SDL_GAMEPAD_AXIS_RIGHTY,0);

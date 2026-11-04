@@ -1,4 +1,5 @@
 // bbport: SDL3 window for the Vulkan swapchain (X11 or Wayland).
+#include <atomic>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -77,6 +78,13 @@ void SetWindowIcon(SDL_Window* window) {
 void SetWindowIcon(SDL_Window*) {}
 #endif
 } // namespace
+
+namespace {
+std::atomic<int> key_f9_requests{0}; // F9 presses not yet taken by the pad sampling (bbport: stick re-centre)
+}
+extern "C" int bbgpu_key_f9_take(void) {
+    return key_f9_requests.exchange(0) ? 1 : 0;
+}
 
 extern "C" void bbgpu_mouse_configure(int look) {
     mouse_look = look != 0;
@@ -235,6 +243,10 @@ bool WindowSDL::PollEvents() {
             }
             UpdateTextTitle();
             continue;
+        }
+        // F9 (stick re-centre, runtime_pad.c): an event, so a short tap is never missed by the pad thread.
+        if (event.type == SDL_EVENT_KEY_DOWN && event.key.key == SDLK_F9 && !event.key.repeat) {
+            key_f9_requests.store(1);
         }
         // BB_TEXTURE_DUMP=1: F10 saves the textures of the next frame (user/texture_dump).
         if (event.type == SDL_EVENT_KEY_DOWN && event.key.key == SDLK_F10 && !event.key.repeat) {

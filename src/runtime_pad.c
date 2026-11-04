@@ -97,25 +97,29 @@ static int stick_deadzone_setting(const char *name, int fallback) {
 }
 
 /* ---- stick rest-centre calibration (workaround for a stick that rests off centre) -----------------
- * A faulty stick can rest far from (0,0) (the owner's right stick: ry = -23630). Per stick a rest centre
- * (cx,cy) is learned; the raw value is shifted by it with asymmetric rescaling per axis, so the full
+ * A faulty stick can rest far from (0,0) (the owner's right stick: ry = -21000..-23630). Per stick a rest
+ * centre (cx,cy) is learned; the raw value is shifted by it with asymmetric rescaling per axis, so the full
  * physical range still reaches full output, before the radial deadzone. Centre (0,0) is the identity.
- * The centre is learned (1) automatically in the first 2 s after the pad connects if a stick holds one
- * steady value outside its deadzone, (2) on demand: F9 or View + right-stick click held for 1 s, and
- * dropped again (3) when the raw stick rests near the true centre for 3 s although the corrected output
- * would be a big deflection (the fault has cleared). All time-dependent functions take `now` (us). */
+ * The centre is learned (1) automatically, all the time: a stick whose raw value stays outside its deadzone
+ * and within CAL_STUCK_SPREAD (+-64) on both axes for 3 s is stuck (on MFi SDL reports 0 until the first real
+ * stick event, so the fault only shows after the first movement: a connect-only window never sees it),
+ * (2) on demand: F9 (a window key event) or LB + RB + right-stick click, or View + right-stick click,
+ * held 1 s, and dropped again (3) when the raw stick rests near the true centre for 3 s although the
+ * corrected output would be a big deflection (the fault has cleared). Time-dependent functions take `now` (us). */
 #define CAL_LIMIT 0.85            /* refuse a centre beyond this fraction of full range */
-#define CAL_AUTO_US 2000000u      /* auto-centre window after connect */
-#define CAL_AUTO_SPREAD 1000      /* max-min allowed over the window, per axis */
+#define CAL_STUCK_US 3000000u     /* raw constant for this long, outside the deadzone -> stuck */
+#define CAL_STUCK_SPREAD 128      /* max-min allowed over the run, per axis (+-64) */
+#define CAL_SAME_CENTRE 128       /* a stuck value this close to the current centre changes nothing */
 #define CAL_RELEASE_US 3000000u   /* raw at the true centre for this long -> centre reset */
 #define CAL_RELEASE_FRAC 0.25     /* ... if the corrected output would exceed this fraction of full range */
-#define CAL_CHORD_US 1000000u     /* View + right-stick click */
+#define CAL_CHORD_US 1000000u     /* LB + RB + right-stick click, or View + right-stick click */
 typedef struct {
     int cx[2], cy[2];             /* [0] left, [1] right stick */
-    int auto_state;               /* 0 not connected yet, 1 collecting, 2 finished or disabled */
-    uint64_t auto_start, rest_since[2], chord_since;
-    int amin[4], amax[4], an; long long asum[4];
-    int chord_fired, f9_was_down;
+    int auto_state;               /* 1 stuck-stick detection on, 2 off (BB_STICK_AUTOCENTER=0) */
+    uint64_t rest_since[2], chord_since;
+    uint64_t run_since[2];        /* start of the current constant run per stick, 0 = none */
+    int rmin[2][2], rmax[2][2]; long long rsum[2][2]; int rn[2]; int refused[2];
+    int chord_fired;
 } PadCal;
 static PadCal cal;
 static int16_t stick_calibrate_axis(int v, int c) {
@@ -136,8 +140,8 @@ static int autocentre_enabled(void) {
 }
 static void cal_connect(PadCal *c, uint64_t now) {
     memset(c,0,sizeof(*c));
+    (void)now;
     c->auto_state=autocentre_enabled() ? 1 : 2;
-    c->auto_start=now;
 }
 static void cal_log(const PadCal *c, const char *suffix) {
     printf("Runtime: stick centre recalibrated: left (%d,%d) right (%d,%d)%s\n",c->cx[0],c->cy[0],c->cx[1],c->cy[1],suffix);
@@ -164,27 +168,37 @@ static void cal_recentre(PadCal *c, const int raw[4], const int dz[2], const cha
     for (int s=0;s<2;++s) cal_capture(c,s,raw[2*s],raw[2*s+1],dz[s]);
     cal_log(c,suffix);
 }
-/* First CAL_AUTO_US after connect: a stick that stays stable (max-min < spread on both axes) outside its
- * deadzone gets that value as its centre; one that varies is being touched and is left alone. */
-static void cal_auto(PadCal *c, const int raw[4], const int dz[2], uint64_t now) {
+/* Continuous: a stick whose raw value stays outside its deadzone and within CAL_STUCK_SPREAD on both axes
+ * for CAL_STUCK_US is stuck; the mean becomes its centre. A hand holding a stick deflected jitters more and
+ * usually moves within 3 s; the rare false capture is undone by F9 / the chord or by the auto-release. */
+static void cal_stuck(PadCal *c, const int raw[4], const int dz[2], uint64_t now) {
     if (c->auto_state!=1) return;
-    if (!c->an) for (int i=0;i<4;++i) { c->amin[i]=c->amax[i]=raw[i]; c->asum[i]=0; }
-    for (int i=0;i<4;++i) {
-        if (raw[i]<c->amin[i]) c->amin[i]=raw[i];
-        if (raw[i]>c->amax[i]) c->amax[i]=raw[i];
-        c->asum[i]+=raw[i];
-    }
-    ++c->an;
-    if (now-c->auto_start<CAL_AUTO_US) return;
-    c->auto_state=2;
-    int any=0;
     for (int s=0;s<2;++s) {
-        if (c->amax[2*s]-c->amin[2*s]>=CAL_AUTO_SPREAD || c->amax[2*s+1]-c->amin[2*s+1]>=CAL_AUTO_SPREAD) continue;
-        const double mx=(double)c->asum[2*s]/c->an, my=(double)c->asum[2*s+1]/c->an;
-        if (SDL_sqrt(mx*mx+my*my)<=(double)dz[s]) continue;
-        if (cal_capture(c,s,mx,my,dz[s])!=0) any=1;
+        const int v[2]={raw[2*s],raw[2*s+1]};
+        if (SDL_sqrt((double)v[0]*v[0]+(double)v[1]*v[1])<=(double)dz[s]) { c->run_since[s]=0; c->refused[s]=0; continue; }
+        int restart=!c->run_since[s];
+        if (!restart) {
+            for (int i=0;i<2;++i) {
+                if (v[i]<c->rmin[s][i]) c->rmin[s][i]=v[i];
+                if (v[i]>c->rmax[s][i]) c->rmax[s][i]=v[i];
+                if (c->rmax[s][i]-c->rmin[s][i]>CAL_STUCK_SPREAD) restart=1;
+            }
+            if (restart) c->refused[s]=0;
+        }
+        if (restart) {
+            c->run_since[s]=now; c->rn[s]=1;
+            for (int i=0;i<2;++i) { c->rmin[s][i]=c->rmax[s][i]=v[i]; c->rsum[s][i]=v[i]; }
+            continue;
+        }
+        ++c->rn[s];
+        for (int i=0;i<2;++i) c->rsum[s][i]+=v[i];
+        if (now-c->run_since[s]<CAL_STUCK_US || c->refused[s]) continue;
+        const double mx=(double)c->rsum[s][0]/c->rn[s], my=(double)c->rsum[s][1]/c->rn[s];
+        if (SDL_fabs(mx-c->cx[s])<=CAL_SAME_CENTRE && SDL_fabs(my-c->cy[s])<=CAL_SAME_CENTRE) continue; /* already centred */
+        const int r=cal_capture(c,s,mx,my,dz[s]);
+        if (r<0) c->refused[s]=1;
+        else if (r>0) cal_log(c," (auto, stuck 3 s)");
     }
-    if (any) cal_log(c," (auto)");
 }
 /* A calibrated stick whose raw value rests within the deadzone of the true centre for CAL_RELEASE_US while
  * the corrected output would be a big deflection has sprung back: drop the centre (no reverse drift). */
@@ -995,6 +1009,28 @@ static int prompts_pad_device(SDL_Gamepad *g) {
     return SDL_GetGamepadButtonLabel(g,SDL_GAMEPAD_BUTTON_SOUTH)==SDL_GAMEPAD_BUTTON_LABEL_CROSS ? 1 : 2;
 }
 
+/* BB_PAD_LOG=1: every gamepad button (SDL's mapped names) and every raw joystick button transition, once, to
+ * see which buttons a backend really delivers (MFi may not map the Xbox View button). */
+static void log_pad_buttons(SDL_Gamepad *g) {
+    static uint64_t mapped; static uint64_t raw_mask; static SDL_Gamepad *last;
+    if (g!=last) { last=g; mapped=0; raw_mask=0; }
+    for (int b=0;b<SDL_GAMEPAD_BUTTON_COUNT && b<64;++b) {
+        const int down=SDL_GetGamepadButton(g,(SDL_GamepadButton)b);
+        if (down==!!(mapped>>b & 1)) continue;
+        mapped^=1ull<<b;
+        const char *name=SDL_GetGamepadStringForButton((SDL_GamepadButton)b);
+        printf("PADBTN: gamepad button %d (%s) %s\n",b,name ? name : "?",down ? "down" : "up");
+    }
+    SDL_Joystick *j=SDL_GetGamepadJoystick(g);
+    const int n=j ? SDL_GetNumJoystickButtons(j) : 0;
+    for (int b=0;b<n && b<64;++b) {
+        const int down=SDL_GetJoystickButton(j,b);
+        if (down==!!(raw_mask>>b & 1)) continue;
+        raw_mask^=1ull<<b;
+        printf("PADBTN: joystick button %d %s\n",b,down ? "down" : "up");
+    }
+}
+
 static void sample_host(PadData *d) {
     memset(d,0,sizeof(*d));
     d->left_x=d->left_y=d->right_x=d->right_y=128;
@@ -1047,22 +1083,29 @@ static void sample_host(PadData *d) {
         const int16_t rlx=SDL_GetGamepadAxis(g,SDL_GAMEPAD_AXIS_LEFTX), rly=SDL_GetGamepadAxis(g,SDL_GAMEPAD_AXIS_LEFTY);
         const int16_t rrx=SDL_GetGamepadAxis(g,SDL_GAMEPAD_AXIS_RIGHTX), rry=SDL_GetGamepadAxis(g,SDL_GAMEPAD_AXIS_RIGHTY);
         const int raw4[4]={rlx,rly,rrx,rry}, dz2[2]={dz_left,dz_right};
-        /* F9 (also the pad recorder's key: with BB_PAD_RECORD set it keeps that job) or View + right-stick
-         * click held 1 s: take the sticks' current raw values as their rest centre. */
+        /* F9 (a main-thread window key event, taken here; also the pad recorder's key: with BB_PAD_RECORD set it
+         * keeps that job) or a chord held 1 s: take the sticks' current raw values as their rest centre. The
+         * chord is LB + RB + right-stick click, or View + right-stick click (MFi may not deliver View). */
         static int record_key=-1;
         if (record_key<0) record_key=getenv("BB_PAD_RECORD") && *getenv("BB_PAD_RECORD");
-        const int f9=!record_key && k && k[SDL_SCANCODE_F9];
-        if (f9 && !cal.f9_was_down) cal_recentre(&cal,raw4,dz2,"");
-        cal.f9_was_down=f9;
-        const int chord=SDL_GetGamepadButton(g,SDL_GAMEPAD_BUTTON_BACK) && SDL_GetGamepadButton(g,SDL_GAMEPAD_BUTTON_RIGHT_STICK);
-        if (!chord) { cal.chord_since=0; cal.chord_fired=0; }
+        if (bbgpu_key_f9_take() && !record_key) cal_recentre(&cal,raw4,dz2,"");
+        const int r3=SDL_GetGamepadButton(g,SDL_GAMEPAD_BUTTON_RIGHT_STICK);
+        const int chord_lr=r3 && SDL_GetGamepadButton(g,SDL_GAMEPAD_BUTTON_LEFT_SHOULDER) &&
+                           SDL_GetGamepadButton(g,SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER);
+        const int chord_view=r3 && SDL_GetGamepadButton(g,SDL_GAMEPAD_BUTTON_BACK);
+        if (!(chord_lr || chord_view)) { cal.chord_since=0; cal.chord_fired=0; }
         else {
             if (!cal.chord_since) cal.chord_since=now;
             if (!cal.chord_fired && now-cal.chord_since>=CAL_CHORD_US) { cal.chord_fired=1; cal_recentre(&cal,raw4,dz2,""); }
-            for (int a=0;a<16;++a)   /* the chord's own buttons do not reach the game */
-                if (input.pad[a]==SDL_GAMEPAD_BUTTON_BACK || input.pad[a]==SDL_GAMEPAD_BUTTON_RIGHT_STICK) d->buttons&=~actions[a].ps;
+            for (int a=0;a<16;++a) {  /* the chord's own buttons do not reach the game */
+                const int b=input.pad[a];
+                if (b==SDL_GAMEPAD_BUTTON_RIGHT_STICK || (chord_view && b==SDL_GAMEPAD_BUTTON_BACK) ||
+                    (chord_lr && (b==SDL_GAMEPAD_BUTTON_LEFT_SHOULDER || b==SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER)))
+                    d->buttons&=~actions[a].ps;
+            }
         }
-        cal_auto(&cal,raw4,dz2,now);
+        if (pad_log) log_pad_buttons(g);
+        cal_stuck(&cal,raw4,dz2,now);
         cal_release(&cal,raw4,dz2,now);
         int16_t clx, cly, crx, cry;
         stick_calibrate(rlx,rly,cal.cx[0],cal.cy[0],&clx,&cly);

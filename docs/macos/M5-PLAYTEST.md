@@ -30,7 +30,7 @@ BB_GPU_ID=0 BB_PERF_LOG=1 BB_GPU_CHECKPOINTS=1 BB_GAME_DIR=/Users/akserg/Project
 | Settings overlay | **F10** (fn+F10 on a MacBook) or Insert | **L3 + R3 together** |
 | Free the mouse pointer | hold Left Option (Alt) | |
 | **Mark this spot in the log** | **F8** (fn+F8 on a MacBook; if no `MARK` line shows up, see below) | |
-| **Re-centre the sticks** (a stick that rests off centre) | **F9** (fn+F9 on a MacBook) | **View (Back) + right-stick click, held 1 s** |
+| **Re-centre the sticks** (a stick that rests off centre) | **F9** (fn+F9 on a MacBook) | **LB + RB + right-stick click, held 1 s** (or View + right-stick click, if your backend delivers View) |
 
 **F8/F10 on a MacBook:** a bare F8/F10 is a media key (play/pause, mute) that the game never sees. Either hold fn,
 or switch on System Settings → Keyboard → "Use F1, F2, etc. keys as standard function keys". To check which keys
@@ -94,15 +94,18 @@ Write down for each: the `gamepad backend` line, the `PAD:` line at rest (`sent`
 the camera creeps, whether the LED stops blinking, whether vibration and every button work.
 
 
-## Stick rest-centre calibration (triage round 4)
+## Stick rest-centre calibration (triage rounds 4 and 5)
 For a stick that rests off centre (your right stick sometimes rests about 72 % up). The port learns the rest
 position and corrects for it; full deflection still reaches the full range.
-- **Automatic**: `BB_STICK_AUTOCENTER=1` (the default on macOS, `0` switches it off). In the first 2 s after
-  `gamepad connected`, **leave the sticks alone**: a stick holding one steady value outside its deadzone becomes its
-  centre (log: `Runtime: stick centre recalibrated: left (x,y) right (x,y) (auto)`). If you touch a stick during
-  those 2 s it is not calibrated.
-- **On demand** (the rest point moves while you play): leave the sticks resting and press **F9** (fn+F9 on a MacBook),
-  or hold **View + right-stick click** for 1 s (the two buttons do nothing in the game meanwhile). Log:
+- **Automatic, always on** (`BB_STICK_AUTOCENTER=1`, the default on macOS, `0` switches it off): a stick whose raw
+  value stays outside its deadzone and within +-64 on both axes for 3 s is "stuck" and becomes its own centre (log:
+  `Runtime: stick centre recalibrated: left (x,y) right (x,y) (auto, stuck 3 s)`). It runs the whole session, not just
+  after connect (with MFi the stuck value only appears after the first stick movement). A hand holding a stick
+  deflected jitters more than that and is not captured; the rare false capture is undone by F9, the chord or the
+  auto-release.
+- **On demand**: leave the sticks resting and press **F9** (fn+F9 on a MacBook; taken from the window's key events),
+  or hold **LB + RB + right-stick click** for 1 s (those buttons do nothing in the game meanwhile; View + right-stick
+  click also works where the controller backend delivers View). Log:
   `Runtime: stick centre recalibrated: left (x,y) right (x,y)`. A stick that is at rest at its true centre
   (inside the deadzone) goes back to centre (0,0). F9 is also the pad recorder's key: with `BB_PAD_RECORD` set it
   keeps that job and the recentre key is off (use the chord).
@@ -113,3 +116,8 @@ position and corrects for it; full deflection still reaches the full range.
 
 Check: run with `BB_PAD_LOG=1`, leave the sticks alone 10 s, then `grep -E 'stick centre|PAD:' user/last_run.log`.
 `sent` must be `128 128 128 128` with the camera still. With a healthy stick there is no `centre` log line.
+
+**Round 5 check:** run with `BB_PAD_LOG=1 BB_KEY_LOG=1`, move the right stick once (the fault appears), let go and
+wait 4 s: expect `stick centre recalibrated ... (auto, stuck 3 s)`. Then press fn+F9 and, separately, hold
+LB + RB + right-stick click for 2 s. `BB_PAD_LOG=1` also prints `PADBTN:` lines for every button press/release the
+backend delivers (press View once to see whether it arrives at all).

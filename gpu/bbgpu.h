@@ -44,6 +44,9 @@ void bbgpu_mouse_configure(int look);
  * it is; 0 before the first frame with a known camera. */
 int bbgpu_camera_yaw(float *yaw_degrees, double *age_seconds);
 int bbgpu_mouse_sample(float *dx, float *dy, uint32_t *buttons, int *wheel);
+/* 1 once per F9 key press seen by the window's event loop (main thread), then 0 until the next press: the
+ * pad sampling's stick re-centre request. */
+int bbgpu_key_f9_take(void);
 /* In-game trophy notice (the overlay draws it for a few seconds, one at a time): grade 1 platinum,
  * 2 gold, 3 silver, 4 bronze; png is the trophy's icon (a PNG file) or empty. */
 void bbgpu_trophy_notify(int grade, const char *game, const char *name, const void *png, uint64_t png_size);
