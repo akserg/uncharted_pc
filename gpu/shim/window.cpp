@@ -28,6 +28,23 @@ u32 mouse_buttons{};
 std::atomic<bool> mouse_look{false}, mouse_captured{false};
 bool window_focused{true};
 
+// bbport (macOS, M5 round 7): the mouse is captured on the first click / W,A,S,D in the window, not at launch.
+// mouse_armed gates the capture; without click_capture (other platforms, or BB_MOUSE_CAPTURE_AT_LAUNCH=1) it is always true.
+#ifdef __APPLE__
+const bool click_capture = [] { const char* e = std::getenv("BB_MOUSE_CAPTURE_AT_LAUNCH"); return !(e && e[0] == '1'); }();
+#else
+const bool click_capture = false;
+#endif
+bool mouse_armed = !click_capture;
+const bool mouse_key_log = [] { const char* e = std::getenv("BB_KEY_LOG"); return e && e[0] == '1'; }();
+
+void MouseLog(const char* what, const char* reason) {
+    if (mouse_key_log) {
+        std::printf("Mouse: %s (%s)\n", what, reason);
+        std::fflush(stdout);
+    }
+}
+
 u32 MouseBit(u8 button) {
     switch (button) {
     case SDL_BUTTON_LEFT: return 1u;
@@ -88,6 +105,10 @@ extern "C" int bbgpu_key_f9_take(void) {
 
 extern "C" void bbgpu_mouse_configure(int look) {
     mouse_look = look != 0;
+    if (look && click_capture) {
+        std::printf("Runtime: mouse capture on first click (BB_MOUSE_CAPTURE_AT_LAUNCH=1 for capture at launch)\n");
+        std::fflush(stdout);
+    }
 }
 
 extern "C" int bbgpu_mouse_sample(float* dx, float* dy, uint32_t* buttons, int* wheel) {
@@ -246,11 +267,25 @@ bool WindowSDL::PollEvents() {
     // the settings menu, text entry and a held Left Alt give it back.
     {
         const bool* keys = SDL_GetKeyboardState(nullptr);
-        const bool want = mouse_look && window_focused && !text_active &&
-                          !BbOverlay::CapturesInput() && !(keys && keys[SDL_SCANCODE_LALT]);
+        static bool relative_logged = false;
+        if (!relative_logged) { // SDL's relative-mouse state, once, at the first poll (after launch)
+            relative_logged = true;
+            std::printf("Runtime: SDL relative mouse mode at launch: %s\n", SDL_GetWindowRelativeMouseMode(window) ? "on" : "off");
+            std::fflush(stdout);
+        }
+        const bool alt = keys && keys[SDL_SCANCODE_LALT];
+        if (click_capture && alt && mouse_armed) { // a release by Left Option stays released until the next click / WASD
+            mouse_armed = false;
+            MouseLog("release", "Left Option held");
+        }
+        const bool want = mouse_look && mouse_armed && window_focused && !text_active &&
+                          !BbOverlay::CapturesInput() && !alt;
         if (want != mouse_captured) {
             SDL_SetWindowRelativeMouseMode(window, want);
             mouse_captured = want;
+            MouseLog(want ? "capture" : "release",
+                     want ? "armed by click or movement key" : !window_focused ? "window unfocused"
+                     : alt ? "Left Option held" : !mouse_armed ? "not armed" : "menu or text entry");
             std::scoped_lock lock{mouse_mutex};
             mouse_dx = mouse_dy = 0.0f;
             mouse_buttons = 0;
@@ -310,6 +345,16 @@ bool WindowSDL::PollEvents() {
             continue;
         }
         switch (event.type) {
+        case SDL_EVENT_KEY_DOWN: {
+            // Arm the capture on the first movement key (keyboard play); the key itself still reaches the game.
+            const SDL_Scancode sc = event.key.scancode;
+            if (click_capture && !mouse_armed && window_focused && !text_active && !BbOverlay::CapturesInput() &&
+                (sc == SDL_SCANCODE_W || sc == SDL_SCANCODE_A || sc == SDL_SCANCODE_S || sc == SDL_SCANCODE_D)) {
+                mouse_armed = true;
+                MouseLog("arm", "movement key");
+            }
+            break;
+        }
         case SDL_EVENT_MOUSE_MOTION:
             if (mouse_captured) {
                 std::scoped_lock lock{mouse_mutex};
@@ -319,6 +364,13 @@ bool WindowSDL::PollEvents() {
             break;
         case SDL_EVENT_MOUSE_BUTTON_DOWN:
         case SDL_EVENT_MOUSE_BUTTON_UP: {
+            if (click_capture && !mouse_armed && event.type == SDL_EVENT_MOUSE_BUTTON_DOWN &&
+                (event.button.button == SDL_BUTTON_LEFT || event.button.button == SDL_BUTTON_RIGHT) &&
+                window_focused && !text_active && !BbOverlay::CapturesInput()) {
+                mouse_armed = true; // this click only captures the pointer: it is not fire / aim
+                MouseLog("arm", "mouse click (consumed)");
+                break;
+            }
             std::scoped_lock lock{mouse_mutex};
             if (event.type == SDL_EVENT_MOUSE_BUTTON_DOWN && !BbOverlay::CapturesInput()) {
                 mouse_buttons |= MouseBit(event.button.button);
@@ -338,6 +390,10 @@ bool WindowSDL::PollEvents() {
             break;
         case SDL_EVENT_WINDOW_FOCUS_LOST: {
             window_focused = false;
+            if (click_capture && mouse_armed) {
+                mouse_armed = false; // back in the window: click or W/A/S/D again
+                MouseLog("disarm", "window unfocused");
+            }
             std::scoped_lock lock{mouse_mutex};
             mouse_buttons = 0;
             break;

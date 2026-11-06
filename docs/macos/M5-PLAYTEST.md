@@ -133,3 +133,14 @@ backend delivers (press View once to see whether it arrives at all).
 - Check: start from Terminal without clicking the window and press buttons (`BB_PAD_LOG=1`: `PADBTN:` lines in
   `user/last_run.log`); then bring Unity or Terminal to the front and press buttons again: the lines keep coming.
   Look for `Runtime: gamepad background events on; window activated at launch` in the log.
+
+
+## Mouse capture (triage round 7)
+The pointer is **not** captured at launch. It is captured on your first left/right click in the game window (that
+click is not fire/aim) or first W/A/S/D press. It is released when the window loses focus or while Left Option is
+held, and then captured again only by a click or W/A/S/D. The controller never captures it.
+`BB_MOUSE_CAPTURE_AT_LAUNCH=1` brings back capture at launch.
+Check: `BB_KEY_LOG=1 ... ./run.sh`; at launch the pointer is visible and the log has `Runtime: mouse capture on
+first click` and `SDL relative mouse mode at launch: off`. Click in the game (if the game is not frontmost, the first
+click only brings it forward): pointer hides, log `Mouse: arm (mouse click (consumed))` then `Mouse: capture`.
+Cmd+Tab away: `Mouse: release (window unfocused)`; come back and click once to capture again.

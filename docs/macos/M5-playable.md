@@ -411,3 +411,13 @@ Next: optional rest-centre calibration in the port as a workaround (owner reques
 - Remaining annoyance: at launch the game captures the mouse (pointer hidden), so the owner has to use Cmd+Tab to
   reach another app. Workaround today: hold Left Option to free the pointer. Fix candidate: triage round 7.
 - Stick drift: solved by the round-5 stuck detection (owner: camera creep gone in gameplay).
+
+### Triage round 7: mouse capture (agent, 2026-11-06)
+
+**What captured the mouse at launch.** `WindowSDL::PollEvents` (`gpu/shim/window.cpp`) computed `want = mouse_look && window_focused && !text_active && !overlay && !LeftOption` every poll and called `SDL_SetWindowRelativeMouseMode(window, true)` as soon as the window had focus (activated once at launch since round 6). `mouse_look` is on by default (`runtime_pad.c`, `bbgpu_mouse_configure`), so the pointer was hidden and held from the first frame.
+
+**Change (`gpu/shim/window.cpp`, Apple only by default).** New `mouse_armed` gate in front of that condition. Not armed at launch. Armed by: first left or right click inside the focused window (consumed: it does not reach the game as fire/aim) or first W/A/S/D key down (the key still reaches the game). Disarmed by: window focus lost, Left Option held (both release the pointer; it comes back only by click or W/A/S/D, never by timer or gamepad). Settings menu and text entry still release and restore the capture as before (they do not disarm). Gamepad events never touch it. `BB_MOUSE_CAPTURE_AT_LAUNCH=1` restores the old behaviour; other platforms are unchanged (always armed).
+
+**Logs.** Once: `Runtime: mouse capture on first click (BB_MOUSE_CAPTURE_AT_LAUNCH=1 for capture at launch)` and `Runtime: SDL relative mouse mode at launch: off|on`. With `BB_KEY_LOG=1`: `Mouse: arm|disarm|capture|release (<reason>)`.
+
+**Verified (U1 to START, shell, `user/m5-round7-run.log`).** Both Runtime lines present, relative mode `off`, no `Mouse: capture` line without input. Tests: `ROSETTA_ADVERTISE_AVX=1 bash build.sh --test` exit 0, 18 PASS, -Werror on. **Not verified from the shell:** clicking, W/A/S/D and focus changes (need a human).
