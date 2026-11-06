@@ -403,3 +403,11 @@ Next: optional rest-centre calibration in the port as a workaround (owner reques
 **Verified (U1 to START, shell).** Frontmost (`lsappinfo front`) 0.8 s after launch: `bb-probe` (before launch: Ghostty/Unity, the owner's Unity Editor also took focus a few seconds later, as expected). Then Finder was raised with osascript; 10 s later, sampled every second: Finder still frontmost, the game did not take focus back. Tests: all pass (`ROSETTA_ADVERTISE_AVX=1 bash build.sh --test`).
 
 **Not verified.** Buttons pressed while unfocused (shell cannot hold buttons).
+
+#### Owner verification of round 6 (2026-11-04/06, log `user/m5-focus-check.log`)
+- `Runtime: gamepad background events on; window activated at launch` logged; the window activated itself once.
+- All buttons arrived (A, B, X, Y, LB, RB, View, Menu) with the game in front **and** with Terminal and with the
+  Unity Editor in front; the game reacted in both cases. The game did not take focus back after launch.
+- Remaining annoyance: at launch the game captures the mouse (pointer hidden), so the owner has to use Cmd+Tab to
+  reach another app. Workaround today: hold Left Option to free the pointer. Fix candidate: triage round 7.
+- Stick drift: solved by the round-5 stuck detection (owner: camera creep gone in gameplay).
