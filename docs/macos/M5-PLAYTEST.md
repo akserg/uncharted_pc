@@ -121,3 +121,15 @@ Check: run with `BB_PAD_LOG=1`, leave the sticks alone 10 s, then `grep -E 'stic
 wait 4 s: expect `stick centre recalibrated ... (auto, stuck 3 s)`. Then press fn+F9 and, separately, hold
 LB + RB + right-stick click for 2 s. `BB_PAD_LOG=1` also prints `PADBTN:` lines for every button press/release the
 backend delivers (press View once to see whether it arrives at all).
+
+
+## Input while another app is in front (triage round 6)
+- The **controller keeps working while another app is frontmost** (Unity Editor, Terminal, Finder): the port sets
+  SDL's background-events hint. The game window is activated once at launch (it appears in the Dock) and never takes
+  focus back, so a Unity recompile can come to the front without a fight.
+- **Keyboard and mouse need the game window active** (macOS delivers them to the frontmost app only).
+- A Unity Play-mode scene that reads gamepads sees the same controller input at the same time; the two programs
+  share the pad.
+- Check: start from Terminal without clicking the window and press buttons (`BB_PAD_LOG=1`: `PADBTN:` lines in
+  `user/last_run.log`); then bring Unity or Terminal to the front and press buttons again: the lines keep coming.
+  Look for `Runtime: gamepad background events on; window activated at launch` in the log.

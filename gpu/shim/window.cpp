@@ -101,10 +101,37 @@ extern "C" int bbgpu_mouse_sample(float* dx, float* dy, uint32_t* buttons, int* 
     return mouse_captured ? 1 : 0;
 }
 
+#ifdef __APPLE__
+#include <objc/message.h>
+#include <objc/runtime.h>
+// A bare process started from Terminal is not the active app: make it a regular app (Dock icon) and
+// activate it ONCE at launch. Never called again, so another app (Unity Editor) can take the focus freely.
+static void ActivateAppOnce(SDL_Window* window) {
+    auto send = [](id self, const char* sel) { return reinterpret_cast<id (*)(id, SEL)>(objc_msgSend)(self, sel_registerName(sel)); };
+    id app = send(reinterpret_cast<id>(objc_getClass("NSApplication")), "sharedApplication");
+    if (app) {
+        reinterpret_cast<BOOL (*)(id, SEL, long)>(objc_msgSend)(app, sel_registerName("setActivationPolicy:"), 0); // Regular
+        // macOS 14+ activation is cooperative: -activate asks, the old ignoringOtherApps form is ignored.
+        // The launch-time call is both: whichever the running macOS honours.
+        if (class_respondsToSelector(object_getClass(app), sel_registerName("activate"))) {
+            send(app, "activate");
+        }
+        reinterpret_cast<void (*)(id, SEL, BOOL)>(objc_msgSend)(app, sel_registerName("activateIgnoringOtherApps:"), YES);
+    }
+    SDL_RaiseWindow(window);
+    std::printf("Runtime: gamepad background events on; window activated at launch\n");
+    std::fflush(stdout);
+}
+#endif
+
 namespace Frontend {
 
 WindowSDL::WindowSDL(s32 width_, s32 height_, const char* title) : width{width_}, height{height_} {
     // Gamepads are sampled by runtime_pad.c; their events are pumped here with the window's.
+#ifdef __APPLE__
+    // Keep controller input while another app is frontmost (SDL drops it otherwise); set before the init.
+    SDL_SetHint(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS, "1");
+#endif
     if (!SDL_InitSubSystem(SDL_INIT_VIDEO | SDL_INIT_GAMEPAD)) {
         UNREACHABLE_MSG("Failed to initialize SDL video: {}", SDL_GetError());
     }
@@ -133,6 +160,9 @@ WindowSDL::WindowSDL(s32 width_, s32 height_, const char* title) : width{width_}
     SDL_DestroyProperties(props);
     ASSERT_MSG(window, "Failed to create window: {}", SDL_GetError());
     SetWindowIcon(window);
+#ifdef __APPLE__
+    ActivateAppOnce(window);
+#endif
 
     const char* driver = SDL_GetCurrentVideoDriver();
     const SDL_PropertiesID wp = SDL_GetWindowProperties(window);

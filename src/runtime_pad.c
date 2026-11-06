@@ -244,8 +244,19 @@ static void log_gamepad_backend(SDL_Gamepad *g) {
     printf("Runtime: gamepad backend %s (vid %04x pid %04x, guid %s)\n",backend,SDL_GetGamepadVendor(g),SDL_GetGamepadProduct(g),text);
 }
 
+/* Apple: SDL drops joystick events while one of its windows exists without keyboard focus
+ * (SDL_PrivateJoystickShouldIgnoreEvent) unless this hint is set; the MFi driver itself already sets
+ * GCController.shouldMonitorBackgroundEvents. Set before the gamepad subsystem starts (docs/macos/M5-playable.md,
+ * triage round 6). SDL_JOYSTICK_ALLOW_BACKGROUND_EVENTS=0 in the environment still wins. */
+static void allow_background_pad(void) {
+#ifdef __APPLE__
+    SDL_SetHint(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS,"1");
+#endif
+}
+
 /* Opens the first gamepad SDL knows about; called under lock. */
 static SDL_Gamepad *current_gamepad(void) {
+    if (!sdl_ready) allow_background_pad();
     if (!sdl_ready) sdl_ready = SDL_WasInit(SDL_INIT_GAMEPAD) ? 1 : SDL_InitSubSystem(SDL_INIT_GAMEPAD) ? 1 : -1;
     if (sdl_ready<0) return NULL;
     if (gamepad && !SDL_GamepadConnected(gamepad)) { SDL_CloseGamepad(gamepad); gamepad=NULL; }
@@ -1458,6 +1469,7 @@ void runtime_pad_report(void) { printf("Runtime: pad reads=%zu, gamepad=%s\n",re
 
 /* A loader command used by the launcher before the game starts: no Vulkan or guest memory. */
 int runtime_pad_tool(int test, int strength) {
+    allow_background_pad();
     const int already_ready=SDL_WasInit(SDL_INIT_GAMEPAD)!=0;
     if (!already_ready && !SDL_InitSubSystem(SDL_INIT_GAMEPAD)) {
         fprintf(stderr,"Controller detection failed: %s\n",SDL_GetError());
