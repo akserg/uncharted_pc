@@ -31,6 +31,7 @@ Hardware target: M-series Mac, **24 GB unified memory or more** (6 GB "VRAM" + ~
 | M3 | [M3-guest-boots.md](M3-guest-boots.md) | ELF runs until first GNM/VideoOut call | log shows guest `main` reached + first `sceGnm*` |
 | M4 | [M4-window-moltenvk.md](M4-window-moltenvk.md) | Cocoa window + MoltenVK device + first frame | U1 main menu renders |
 | M5 | [M5-playable.md](M5-playable.md) | One game playable at 1080p60, no upscaler | Chapter 1 of U1 completed; perf table vs M0 |
+| M5b | [M5b-performance.md](M5b-performance.md) | Steady 60 fps in U1 gameplay | benchmark table + chosen build config |
 | M6 | [M6-ship.md](M6-ship.md) | `run.sh` + signed `.app` + docs | Clean machine (macOS 15.4+) runs from the zip |
 
 Milestones are sequential. Do not start M(n+1) until M(n)'s **Result** section is filled in.

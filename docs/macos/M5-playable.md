@@ -521,3 +521,14 @@ The 3 + 3 cold samples are the first 3 s of the first stuck episode, before the 
 **Change** (`src/runtime_pad.c`). New setting `BB_STICK_FIX` = `right` (default on `__APPLE__`), `left`, `both` (default elsewhere, the old behaviour) or `none`. It selects the sticks on which stuck detection (round 5), rest memory and snapping (round 8) and corridors (round 9) run. A stick not selected keeps only the round-2 radial deadzone and the manual re-centre (F9 / chord); it never learns, loads or saves rest points. Loading `user/pad_rest_points.txt` ignores (logs once) the lines of unselected sticks, and saving keeps them in the file. `BB_STICK_AUTOCENTER`, `BB_STICK_REST_MEMORY` and `BB_STICK_CORRIDOR` work as before within the selected sticks. Log at connect: `Runtime: stick fix on right stick (BB_STICK_FIX=right)`.
 
 **Tests** (`tests/test_pad.c`): `right`: a 10 s steady 60 % left-stick hold gives no capture, no rest point, no corridor and the output is the round-2 deadzone only; the right-stick round-9 tests pass unchanged; `both`: the hold is captured; a left-stick line in the file is ignored with `right` and stays in the file after a save.
+
+#### Owner check of round 9b (2026-11-08, log `user/m5-round9-check.log`)
+- `stick fix on right stick`, `rest points loaded: left 0 right 1`, corridor `(0,0)→(1143,-20709), half-width 8689,
+  up-look starts at 68% travel`; the rest file holds only the right-stick point.
+- Owner: camera and movement look good; longer play needed to confirm.
+
+### M5 status (reviewer, 2026-11-08)
+**Playable**: U1 reached chapter 7 over several sessions, no open crash, audio fine, controller (incl. the owner's
+faulty right stick, rounds 2–9b) and keyboard/mouse work, focus handling done (rounds 6–7). Open: long-play
+confirmation of round 9 (owner, ongoing) and **performance** — gameplay 40–58 fps with the GPU command thread at
+75–81 % CPU (session 2). Performance moves to [M5b](M5b-performance.md).
