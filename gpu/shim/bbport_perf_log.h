@@ -73,6 +73,16 @@ inline std::uint64_t PhysFootprint() {
     return info.phys_footprint;
 }
 
+/// BB_PERF_FRAMES=<file> (with BB_PERF_LOG=1): one line per guest flip, "<t seconds> <frame ms>", for
+/// tools/macos/bench.sh (exact percentiles over a replay window). Diagnostics only.
+inline std::FILE* FrameFile() {
+    static std::FILE* file = [] {
+        const char* path = std::getenv("BB_PERF_FRAMES");
+        return (path && path[0]) ? std::fopen(path, "w") : nullptr;
+    }();
+    return file;
+}
+
 /// Called on every guest flip (single caller thread).
 inline void OnFlip() {
     if (!enabled) {
@@ -85,6 +95,10 @@ inline void OnFlip() {
     const auto now = Clock::now();
     frame_ms.push_back(std::chrono::duration<double, std::milli>(now - last).count());
     last = now;
+    if (std::FILE* file = FrameFile()) {
+        std::fprintf(file, "%.4f %.3f\n", Seconds(), frame_ms.back());
+        std::fflush(file);
+    }
     const double window = std::chrono::duration<double>(now - window_start).count();
     if (window < 5.0) {
         return;

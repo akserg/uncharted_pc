@@ -54,6 +54,10 @@ if [[ $(uname -s) == Darwin ]]; then
     darwin=(-DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ -DCMAKE_OSX_ARCHITECTURES=x86_64
         -DCMAKE_OSX_DEPLOYMENT_TARGET=15.4 -DCMAKE_PREFIX_PATH="$BB_DEPS" -DCMAKE_POLICY_VERSION_MINIMUM=3.5
         -DCMAKE_IGNORE_PREFIX_PATH='/opt/homebrew;/usr/local' -DCMAKE_FIND_FRAMEWORK=LAST)
+    # M5b experiments (Darwin only): BB_OPT replaces -O2 for libbbgpu (e.g. -O3), BB_HOST_FLAGS are extra compile
+    # flags for it (e.g. "-mavx2 -mfma -mbmi -mbmi2").
+    [[ -n ${BB_OPT:-} ]] && darwin+=("-DCMAKE_CXX_FLAGS_RELWITHDEBINFO=$BB_OPT -g -DNDEBUG" "-DCMAKE_C_FLAGS_RELWITHDEBINFO=$BB_OPT -g -DNDEBUG")
+    [[ -n ${BB_HOST_FLAGS:-} ]] && darwin+=("-DCMAKE_CXX_FLAGS=$BB_HOST_FLAGS" "-DCMAKE_C_FLAGS=$BB_HOST_FLAGS")
 fi
 if [[ -z ${CC:-} ]]; then
     CC=$(command -v cc || command -v gcc || true)

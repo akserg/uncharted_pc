@@ -51,4 +51,38 @@ The likely limit is the GPU command thread (shadPS4 Liverpool command processing
 - Don't change game-visible behaviour (frame pacing, vblank) to win numbers.
 
 ## Result
-_(fill in: date, commits, benchmark table, profiles, chosen configuration, open issues)_
+
+**Date:** 2026-11-08. **Branch:** `macos-perf` (worktree `../uncharted_pc-perf`, from `macos` `3434d25`); commits `macos: M5b benchmark harness ...` and `macos: M5b result` (build.sh opt-in knobs). Nothing pushed or merged. **Status: partial.** Steps 1-4 a-c done; 4d (PGO) and steps 5 (targeted fixes, settings sweep) **not done** (reasons below). 60 fps mean is reached; the p99 <= 20 ms criterion is not.
+
+### Benchmark
+`tools/macos/bench.sh <label> [runs]`: starts U1, drives the menus (title -> Continue -> "Sanctuary?" -> Friend Stats OK, ~125 s after launch), then plays `user/bench-route.pad` (209.9 s, `BB_PAD_REPLAY` + the token `replay` in `BB_PAD_FILE`), `BB_PERF_LOG=1`, `BB_GPU_ID=0`, save data restored from a snapshot before every run, game quit afterwards. Statistics cover the replay window only (new `BB_PERF_FRAMES` per-flip log; GPU-thread CPU and footprint from the PERF windows inside the replay). While `BB_PAD_FILE` is set the game ignores the host controller. Every run records Unity and other-`bb-probe` state (`.mon` file, `max_unity_cpu_pct` in the result); a run with Unity > 100 % CPU or a second `bb-probe` is marked `*.invalid.txt` and redone. The script also refuses to start while another `bb-probe` runs or Unity is busy (re-check every 60 s). Per-run files: `out/bench/<label>-<n>.txt` (+ `-start.png` start frame, `.png` frame at replay +60 s).
+
+**Discarded:** all runs and profiles taken while the owner's second game copy and a Unity editor were running (15:35-15:45, plus a run that never left the title screen) are in `out/bench/invalid*` and are not used. Runs baseline 3-5 (Unity 257-491 % CPU) were rejected automatically.
+
+| variant (3 valid runs, each) | mean fps (min-max) | p99 ft | frames > 20 ms | GPU-thread CPU | peak footprint |
+|---|---|---|---|---|---|
+| baseline, first series (cold pipeline cache; runs 1,2,6) | 57.7 (55.65-58.92) | 33.3 ms | 1.6-7.6 % | 74-77 % | 11.6-11.7 GB |
+| baseline B (control, after the sweep, warm cache) | 59.33 (59.22-59.45) | 16.7 / 33.3 / 33.3 | 0.9-1.3 % | 72-79 % | 11.7 GB |
+| ThinLTO (libbbgpu) | 59.23 (59.16-59.28) | 33.3 | 1.1-1.4 % | 73-80 % | 11.6-11.7 GB |
+| -O3 (libbbgpu, LTO off) | 59.25 (59.06-59.42) | 16.7 / 33.3 / 33.3 | 1.0-1.5 % | 73-78 % | 11.7 GB |
+| -mavx2 -mfma -mbmi -mbmi2 (libbbgpu, LTO off) | 59.22 (59.01-59.35) | 33.3 | 1.1-1.6 % | 76-81 % | 11.7-11.9 GB |
+| profiling run (sample running) | 58.3-58.5 | 33.3 | 1.4 % | 67-79 % | 11.7 GB |
+
+**Reading:** the first baseline series is lower only because the pipeline/shader cache was still warming; every later series, including the unchanged baseline B control, sits at 59.2-59.4 fps with a run-to-run spread of 0.1-0.4 fps. **No variant beats the control beyond that spread**, so none is kept as a default (the rule "no change without a gain"). The replay is vsync-capped at 60 fps; the mean is ~59.3. Remaining gap to the acceptance line: 1.1-1.3 % of frames take 33 ms (a missed vblank), just over the 1 % that p99 <= 20 ms needs; one baseline run and one -O3 run happened to get 0.87-0.95 % (p99 16.7 ms).
+
+The >20 ms frames fall into the same route segments in every run and every variant (first ~60 s of the replay, 20-30 per 10 s) = scene-bound, not a compiler matter.
+
+### Profile (`sample` 10 s at replay +100 s, baseline, `out/bench/sample-baseline.txt`; summarised with `tools/macos/sample_top.py`, unsymbolized/Rosetta leaf frames credited to the nearest symbolized caller)
+GPU command thread `shadPS4:GpuCommandProcessor` (5310 samples), top by self time: `cthread_yield` 51.3 % (inside `Rasterizer::DrainDrawPipe`, spinning until the draw pipeline has drained) / `pthread_mutex firstfit_lock_wait` 12.9 % / `Rasterizer::Draw` 6.8 % / `pthread_mutex firstfit_wake` 4.3 % / `ProcessCompute<true>` 2.4 % / `pthread_cond_signal` 2.1 % / `ProcessGraphics` 2.0 % / `PipelineCache::TryPreparedPipeline` 1.6 % / `Rasterizer::PostDraw` 1.4 % / `Liverpool::Process` 1.4 % / `CollectRingBindings` 1.1 % / `Shader::Info::RefreshFlatBuf` 0.9 % / MoltenVK `MVKCommandBuffer::begin` 0.9 % / `std::mutex::unlock/lock` 0.8/0.7 % / `PipelineCache::GetProgram` 0.6 % / `MVKCommandBuffer::reset` 0.6 % / `vkGetSemaphoreCounterValue` 0.4 % / ... Inclusive: `Process` 58 %, `OnSubmit` -> `DrainDrawPipe` 35 %, `ProcessCompute` 25 % (of which `DispatchDirect` 6 % incl. pipeline refresh 6 %), `ProcessGraphics` 17 %, `Scheduler::WaitHostCopies` 5.4 %.
+**Finding: ~64 % of the command thread is waiting (yield-spin + mutex), not translated compute.** The "GPU-thread CPU 75 %" in PERF is mostly this spin; it is not the limit by itself. The busiest worker is `bb:DrawRec` (draw recording into MoltenVK; its lambda + `AGXG16XFamilyComputeContext`, `MVKCommandEncoder::encode`, `BindResources`); `bb:VkRecorder` 45 % cond-wait, `DrawPrep0-7`, `DrawScan`, `Present`, `NdJobWorker` mostly idle (60-95 % waiting). After the three variants there is no "after" profile: the builds did not change the numbers, so none was profiled.
+
+### Chosen configuration
+**Unchanged Darwin defaults** (RelWithDebInfo -O2, LTO OFF, PGO off). Added to the Darwin path only, opt-in: `BB_OPT` (e.g. `-O3`) and `BB_HOST_FLAGS` (e.g. `-mavx2 -mfma -mbmi -mbmi2`) in `build.sh`; `BB_LTO=ON` already existed. Build-time change: none to the defaults. Reference: a ThinLTO libbbgpu build took 36 s wall (1257 % CPU, incremental) and the library is 3 % larger; -O3 and AVX2 builds took a similar time.
+
+### Not done / open issues
+1. **PGO (4d)**: not run. With the three codegen variants indistinguishable from the control and the thread dominated by waiting, a gain is unlikely; it would need a clang instrumented build (`-fprofile-instr-generate`, `pgo/macos/`) + replay + `llvm-profdata`, ~1 h.
+2. **Targeted fixes / settings sweep (steps 5)**: not done. Leads from the profile: (a) the `DrainDrawPipe` `sched_yield` spin on the command thread burns a core for nothing (replace by a wait; does not change frame pacing) and the `DrawRec` thread is the real critical path (MoltenVK command encoding); (b) the 33 ms frames in the first minute of the route: profile that segment (`BENCH_SAMPLE_AT=20`) to see whether it is pipeline creation, descriptor/`CopySparseMemory` or a MoltenVK stall; (c) sweep `BB_ARENA_PAGE_BITS`, DrawPrep worker count, `MVK_CONFIG_*` against `frames_over_20ms_pct`, since the mean is at the vsync cap.
+3. p99 <= 20 ms is borderline (0.9-1.6 % of frames over 20 ms against a 1 % line); the mean (59.3 >= 58) passes.
+4. The frame comparison at replay +60 s is by eye only (combat is not deterministic, so pixel diffs are meaningless); start frames match the owner's "Sanctuary?" checkpoint in every run; no visual difference between variants.
+5. The first baseline series is a cold-cache number; a fair comparison needs a warm cache (the replay in the harness does not warm it separately; run a throwaway replay first for new variants).
+6. Machine contention is the main risk to these numbers (the owner's game, Unity); the harness now guards against it.
