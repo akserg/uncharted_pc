@@ -431,3 +431,37 @@ Next: optional rest-centre calibration in the port as a workaround (owner reques
   ~3 s of camera drift before stuck detection (or auto-release) catches up, about 130 drift episodes in the session.
 - Left stick: 7 refused captures at `ly = -32768` (the owner holding forward); correct.
 - Next: triage round 8 — remember both rest points and snap to them quickly.
+
+### Triage round 8: rest-point memory (agent, 2026-11-08)
+
+**Why.** Owner session 4: the right stick alternates between true centre (A) and a stuck rest (B); every switch cost about 3 s of drift (stuck detection one way, auto-release the other).
+
+**Change** (`src/runtime_pad.c`; `PadCal`, `rest_*`, `cal_snap`, `cal_update`).
+- Per stick up to `REST_MAX`=4 learned rest points plus the true centre (0,0), which is always known. A point is learned when the 3 s stuck detection captures a centre; points within `REST_MERGE`=3000 merge (the most recent value wins), the oldest is dropped at 4.
+- Fast settle: raw still for `REST_STILL_US`=250 ms (max-min <= `REST_SPREAD`=192 on both axes) and within `REST_RADIUS`=3000 of a known point -> the centre becomes the window's mean raw value (the point's exact current value, rounded; true centre -> (0,0), also for a learned point inside the deadzone). A target beyond 85 % is never adopted; a value within 128 of the current centre changes nothing. Log (`BB_PAD_LOG=1` only): `Runtime: stick centre snapped to rest point k (x,y) (right stick)`, k=0 is the true centre (`snapped to rest point 0 (0,0)` is the return to centre), 1..4 the learned points (list order).
+- Kept: 3 s stuck detection for unknown points, 85 % refusal, F9 and the chord. Removed with memory on: the 3 s auto-release.
+- Persistence: `user/pad_rest_points.txt` (`BB_PAD_REST_FILE`, else `$BB_USER_DIR/pad_rest_points.txt`), lines `<vid>:<pid>:<guid> <stick 0|1> <x> <y>`, loaded at connect, rewritten (other controllers' lines kept) whenever a point is learned. Log: `Runtime: stick rest points loaded: left N right M (path)`.
+- `BB_STICK_REST_MEMORY=0`: no memory, no snapping, no file, and the round-5 auto-release is back (it is the only way to leave a captured centre without F9). Memory also needs detection on (`BB_STICK_AUTOCENTER`, default on for macOS only), so Linux/Windows are unchanged by default.
+- Not touched: keyboard/mouse, `follow_push`, triggers, the left stick's behaviour apart from having its own rest memory (a left point only exists after a 3 s +-64 outside-deadzone hold; an 85 % hold such as full forward is refused as before).
+
+**Deviation.** The brief says to remove the auto-release; it is removed when memory is on, and kept for `BB_STICK_REST_MEMORY=0` (which the brief defines as round-5 behaviour).
+
+**Settle-time measurement (item 7): the log cannot answer it.** `PAD:` lines are printed once per second, so the time the raw value takes to become still is not resolvable below 1 s, and the 250 ms window cannot be tuned against it. What the 11,464 samples do show (A = |rx|,|ry| < 3000; B = ry in [-23000,-17000], rx in [-3000,5000]; B actually spans ry -21,600..-17,200 between episodes, rx -2,400..4,200, so the 3000 radius is needed, not just the -19.5k..-19.8k of the captures):
+- Seconds spent outside both bands between a sample in one state and the next sample in the other: A->B (510 switches) median 2 s, <=1 s 48 %, <=3 s 84 %, p90 5 s; B->A (510) median 1 s, 0 s (rest to rest in consecutive seconds) 41 %, <=1 s 69 %, <=3 s 88 %, p90 4 s. So a switch is a move of roughly 1 to 3 s that includes the player's own stick travel; the rest state itself is reached at the end of it.
+- Jitter at rest, change between consecutive seconds on the larger axis: B p50 0, p90 111, p95 385, p99 1207, **92 % <= 192**; A p50 0, p90 904 (it contains slow play near centre), 72 % <= 192. Within 250 ms the jitter is smaller than across a second, so the 192 spread is consistent with B's noise.
+- **Chosen still-time: 250 ms** (the brief's default; the data does not justify moving it inside 150..400). To measure it properly a 60 Hz trace is needed (a `BB_PAD_LOG` mode that logs raw values per sample for a few seconds after a large change); not added in this round.
+
+**Replay** (`tests/replay_pad_log.c`, built by `build.sh --test` into `out/replay-pad-log`; `out/replay-pad-log user/m5-mouse-check.log <memory 0|1> <settle_ms> <warm 0|1>`). Each logged second is held at 60 Hz through `cal_update` (the code the game runs); a change of more than 192 can optionally ramp over `settle_ms`; `memory 0` is the round-5 logic. Metric: seconds in which the corrected, dead-zoned right stick sends anything but (128,128) while the raw value is in a settled rest state (A or B, with a neighbouring second in the same state within 1500: 1,436 s of A and 2,903 s of B).
+
+| settle (ramp) | round 5 (before) | round 8 cold | round 8 warm (points saved) |
+|---|---|---|---|
+| 0 ms (instant step, best case) | 611 s | 75 s | 64 s |
+| 250 ms | 676 s | 167 s | 154 s |
+| 500 ms | 747 s | 258 s | 247 s |
+| 1000 ms | 829 s | 453 s | 443 s |
+
+At 0 ms the 75 s left are 228 episodes of about a quarter second: the 250 ms floor of the design. The settle columns are a bracket, not a measurement (the real settle time is unknown, see above); the ramp time itself counts as off-centre for both logics. Round 5 episodes (0 ms): 4 under 1.5 s, 78 of 1.5-3.5 s, 59 of 3.5-10 s, 9 longer (611 s); round 8: 228 under 0.5 s, 5 longer than 1.5 s. Counting every second whose value lies in a band (including real stick travel through it) gives 1338 s before and 336 s after at 0 ms. **Validity of the replay:** the round-5 replay reproduces the log's centre (within 300) in 9390 of 11464 samples (82 %), 102 captures against the log's 109; its centre-to-zero changes (46) exceed the log's 24 releases because the count includes captures that landed inside the deadzone. The 1 Hz hold is also kinder to the new logic than reality (a stick moving inside a logged second looks still).
+
+**Tests** (`tests/test_pad.c`): B learned once by the 3 s detection (and saved); sweep to 0 then rest -> centre (0,0) at 250 ms (+ one 16.7 ms sample, not before); settle at (2800,-20900), 1800 from the learned B -> centre = that value, still one point; a new point at (-15000,9000) -> not at 2.85 s, learned at 3 s, later snapped to (-15600,8400) within 250 ms and merged; save -> load in a new `PadCal` -> first settle at (1000,-20200) snaps in 250 ms; a second controller key neither sees nor destroys the first one's lines; a hand-edited point beyond 85 % never snapped; a slow sweep through B (1500/s) and a hold with +-300 jitter never snap; 5th point drops the oldest, a point 1800 away merges; `BB_STICK_REST_MEMORY=0`: captures at 3 s, no fast snap, release after 3 s, no points, no file. `ROSETTA_ADVERTISE_AVX=1 bash build.sh --test`: 18 PASS, exit 0, -Werror on. Tests set `BB_PAD_REST_FILE` to a temporary file, so they never touch `user/pad_rest_points.txt`.
+
+**Not verified.** Nothing on the faulty stick itself (the shell cannot move it); the live behaviour (feel of the snap, false snaps while holding a stick still at a learned point, e.g. 60 % forward held within +-96 for a quarter second) is for the owner's session. Steps: docs/macos/M5-PLAYTEST.md, "Round 8 check".

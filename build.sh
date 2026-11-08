@@ -140,6 +140,7 @@ echo "Built $PWD/out/bb-probe"
 if [[ ${1:-} == --test ]]; then
     "${cc[@]}" -std=c11 -O2 -g -Wall -Wextra -Werror -pthread "${includes[@]}" -I. -Isrc tests/test_pad.c "${libraries[@]}" -o out/pad-test
     out/pad-test
+    "${cc[@]}" -std=c11 -O2 -g -Wall -Wextra -Werror -pthread "${includes[@]}" -I. -Isrc tests/replay_pad_log.c "${libraries[@]}" -o out/replay-pad-log # offline stick-calibration replay tool (M5 round 8)
     "${cc[@]}" -std=c11 -O2 -g -Wall -Wextra -Werror -pthread ${testpie[@]+"${testpie[@]}"} "${includes[@]}" -I. -Isrc tests/test_runtime.c "${runtime[@]}" out/libatrac9.a -lm "${gpu[@]}" "${libraries[@]}" -o out/runtime-test
     out/runtime-test
     "${cc[@]}" -std=c11 -O2 -g -Wall -Wextra -Werror -pthread "${includes[@]}" -Isrc tests/test_file_mods.c -o out/file-mods-test

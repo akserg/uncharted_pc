@@ -46,7 +46,34 @@ static void inject(const char *path, const char *tokens) {
     usleep(25000);
 }
 
+/* Feeds sample-period steps (60 Hz) of the right stick at (rx,ry) +- jit for `ms`; returns the new time. Stops
+ * early when stop_cy is given and the right centre reaches it (the time of that sample is *hit, else 0). */
+#define SAMPLE_US 16667u
+static uint64_t feed(PadCal *c, uint64_t t, int rx, int ry, int ms, int jit, uint64_t *hit, const int *until_cy) {
+    static const int dz2[2]={7849,8689};
+    if (hit) *hit=0;
+    for (int i=0, n=(int)((uint64_t)ms*1000/SAMPLE_US); i<n; ++i, t+=SAMPLE_US) {
+        const int raw[4]={0,-1,rx+((i%3)-1)*jit,ry+(((i/3)%3)-1)*jit};
+        cal_update(c,raw,dz2,t);
+        if (until_cy && !hit[0] && c->cy[1]==*until_cy) { hit[0]=t; }
+    }
+    return t;
+}
+/* A straight move of the right stick between two values at `ms` (spread far above REST_SPREAD). */
+static uint64_t sweep(PadCal *c, uint64_t t, int x0, int y0, int x1, int y1, int ms) {
+    static const int dz2[2]={7849,8689};
+    const int n=(int)((uint64_t)ms*1000/SAMPLE_US);
+    for (int i=0;i<n;++i,t+=SAMPLE_US) {
+        const int raw[4]={0,-1,x0+(x1-x0)*i/n,y0+(y1-y0)*i/n};
+        cal_update(c,raw,dz2,t);
+    }
+    return t;
+}
+
 int main(void) {
+    char restfile[]="bbport-rest-test-XXXXXX";
+    { int rfd=mkstemp(restfile); assert(rfd>=0); close(rfd); unlink(restfile); }
+    set_env("BB_PAD_REST_FILE",restfile);   /* tests never touch the player's user/pad_rest_points.txt */
     char path[]="bbport-pad-test-XXXXXX";
     int fd=mkstemp(path);
     assert(fd>=0);
@@ -222,6 +249,114 @@ int main(void) {
         { int raw[4]={0,0,0,-27800}; cal_recentre(&c,raw,dz2,""); assert(c.cy[1]==-27800); }
         { int raw[4]={20000,0,0,20000}; cal_recentre(&c,raw,dz2,""); assert(c.cx[0]==20000 && c.cy[1]==20000 && c.cx[1]==0); }
         c.cx[0]=c.cy[1]=0;
+        /* ---- rest-point memory (round 8) ---- */
+        {
+            PadCal m; uint64_t t2=5000000, hit;
+            const int zero=0;
+            cal_connect(&m,t2); m.auto_state=1; assert(m.mem==1);
+            strcpy(m.key,"test:0001:guidA");
+            /* B learned once, by the 3 s stuck detection (and saved) */
+            t2=feed(&m,t2,0,-1,1000,0,NULL,NULL);
+            t2=feed(&m,t2,1640,-19502,3300,20,NULL,NULL);
+            assert(m.rp_n[1]==1 && SDL_abs(m.rp_x[1][0]-1640)<=20 && SDL_abs(m.rp_y[1][0]+19502)<=20);
+            assert(m.rp_n[0]==0 && SDL_abs(m.cy[1]+19502)<=20);
+            /* A after B: settle near 0 -> centre (0,0) within 250 ms (+ one sample), not before */
+            t2=sweep(&m,t2,1640,-19502,0,-1,300);
+            assert(m.cy[1]!=0);                                                    /* still moving: no snap */
+            const uint64_t tA=t2;
+            t2=feed(&m,t2,0,-1,600,20,&hit,&zero);
+            assert(m.cx[1]==0 && m.cy[1]==0 && hit);
+            assert(hit-tA>=REST_STILL_US && hit-tA<=REST_STILL_US+SAMPLE_US);
+            /* later: move -> settle at B +-1500 -> centre = that value within 250 ms */
+            t2=sweep(&m,t2,0,-1,2800,-20900,300);
+            t2=feed(&m,t2,2800,-20900,600,20,&hit,NULL);
+            assert(SDL_abs(m.cx[1]-2800)<=20 && SDL_abs(m.cy[1]+20900)<=20);       /* the exact current value */
+            assert(m.rp_n[1]==1);                                                  /* snapping learns nothing new */
+            /* ... and the snap comes at 250 ms of stillness (known point (1640,-19502), settle 1800 away) */
+            { PadCal q; cal_connect(&q,0); q.auto_state=1; q.rp_n[1]=1; q.rp_x[1][0]=1640; q.rp_y[1][0]=-19502;
+              uint64_t u=1000000, first=0, u0=u;
+              for (int i=0;i<40;++i,u+=SAMPLE_US) {
+                  const int raw[4]={0,-1,2800+(i%3-1)*20,-20900+((i/3)%3-1)*20};
+                  cal_update(&q,raw,(const int[2]){7849,8689},u);
+                  if (!first && q.cy[1]) first=u;
+              }
+              assert(first && first-u0>=REST_STILL_US && first-u0<=REST_STILL_US+SAMPLE_US);
+              assert(SDL_abs(q.cx[1]-2800)<=20 && SDL_abs(q.cy[1]+20900)<=20); }
+            /* a new, unknown rest point: 3 s detection, then remembered */
+            t2=sweep(&m,t2,2800,-20900,-15000,9000,300);
+            const uint64_t tN=t2;
+            uint64_t t3=feed(&m,t2,-15000,9000,2850,10,NULL,NULL);
+            assert(m.cy[1]!=9000 && m.rp_n[1]==1);                                 /* not at 2.85 s */
+            t3=feed(&m,t3,-15000,9000,400,10,&hit,NULL);
+            assert(SDL_abs(m.cy[1]-9000)<=10 && m.rp_n[1]==2 && t3-tN>=3000000);
+            t2=sweep(&m,t3,-15000,9000,0,-1,300);
+            t2=feed(&m,t2,0,-1,400,10,NULL,NULL); assert(m.cx[1]==0 && m.cy[1]==0);
+            t2=sweep(&m,t2,0,-1,-15600,8400,300);
+            t2=feed(&m,t2,-15600,8400,600,10,&hit,NULL);
+            assert(SDL_abs(m.cx[1]+15600)<=10 && SDL_abs(m.cy[1]-8400)<=10 && m.rp_n[1]==2);   /* merged: one point */
+            /* persistence: save -> load -> the first settle at B snaps in 250 ms, no 3 s wait */
+            {
+                FILE *rf=fopen(restfile,"r"); assert(rf);
+                char buf[800]; size_t nb=fread(buf,1,sizeof buf-1,rf); buf[nb]=0; fclose(rf);
+                assert(strstr(buf,"test:0001:guidA 1 ") && !strstr(buf,"guidB"));
+                PadCal l; cal_connect(&l,0); l.auto_state=1; strcpy(l.key,"test:0001:guidA"); rest_load(&l);
+                assert(l.rp_n[1]==2 && l.rp_n[0]==0);
+                uint64_t u=1000000, u0, first=0;
+                u=feed(&l,u,0,-1,500,10,NULL,NULL);
+                u=sweep(&l,u,0,-1,1000,-20200,300);
+                u0=u;
+                for (int i=0;i<40;++i,u+=SAMPLE_US) {
+                    const int raw[4]={0,-1,1000+(i%3-1)*20,-20200+((i/3)%3-1)*20};
+                    cal_update(&l,raw,(const int[2]){7849,8689},u);
+                    if (!first && l.cy[1]) first=u;
+                }
+                assert(first && first-u0<=REST_STILL_US+SAMPLE_US && SDL_abs(l.cy[1]+20200)<=20);
+                /* another controller does not see these points; the file keeps both controllers */
+                PadCal o; cal_connect(&o,0); o.auto_state=1; strcpy(o.key,"test:0002:guidB"); rest_load(&o);
+                assert(o.rp_n[1]==0);
+                uint64_t w=feed(&o,1000000,0,-1,500,10,NULL,NULL);
+                w=feed(&o,w,500,-19000,3300,10,NULL,NULL); assert(o.rp_n[1]==1);
+                PadCal l2; cal_connect(&l2,0); l2.auto_state=1; strcpy(l2.key,"test:0001:guidA"); rest_load(&l2);
+                assert(l2.rp_n[1]==2);
+                PadCal o2; cal_connect(&o2,0); o2.auto_state=1; strcpy(o2.key,"test:0002:guidB"); rest_load(&o2);
+                assert(o2.rp_n[1]==1);
+                /* a manually edited point beyond 85 % is never snapped to */
+                PadCal h; cal_connect(&h,0); h.auto_state=1; h.rp_n[1]=1; h.rp_x[1][0]=0; h.rp_y[1][0]=-28500;
+                uint64_t z=feed(&h,1000000,0,-28500,1000,10,NULL,NULL); (void)z;
+                assert(h.cy[1]==0);
+            }
+            /* a human: a slow sweep through B (1500 units/s) and a hold with +-300 jitter never snap */
+            { PadCal h; cal_connect(&h,0); h.auto_state=1; h.rp_n[1]=1; h.rp_x[1][0]=1640; h.rp_y[1][0]=-19502;
+              uint64_t u=1000000;
+              u=sweep(&h,u,0,-24000,0,-14000,6600);
+              assert(h.cy[1]==0);
+              u=feed(&h,u,0,-19500,2500,300,NULL,NULL); assert(h.cy[1]==0);
+              (void)u; }
+            /* more than four points: the oldest is dropped; points within 3000 merge */
+            { PadCal h; cal_connect(&h,0); h.auto_state=1;
+              rest_learn(&h,1,10000,0); rest_learn(&h,1,-10000,0); rest_learn(&h,1,0,10000); rest_learn(&h,1,0,-10000);
+              assert(h.rp_n[1]==4);
+              rest_learn(&h,1,12000,-12000);
+              assert(h.rp_n[1]==4);
+              { int has_first=0; for (int i=0;i<4;++i) if (h.rp_x[1][i]==10000 && h.rp_y[1][i]==0) has_first=1; assert(!has_first); }
+              rest_learn(&h,1,-9000,1500);                 /* 1800 from (-10000,0): the same point, new value */
+              assert(h.rp_n[1]==4);
+              { int found=0; for (int i=0;i<4;++i) if (h.rp_x[1][i]==-9000 && h.rp_y[1][i]==1500) found=1; assert(found); } }
+            /* BB_STICK_REST_MEMORY=0: round-5 behaviour (stuck capture, 3 s auto-release), nothing learned or saved */
+            { unlink(restfile);
+              set_env("BB_STICK_REST_MEMORY","0");
+              PadCal h; cal_connect(&h,0); h.auto_state=1; strcpy(h.key,"test:0003:guidC"); assert(h.mem==0);
+              uint64_t u=feed(&h,1000000,0,-1,1000,10,NULL,NULL);
+              u=feed(&h,u,1000,-20500,3300,20,NULL,NULL);
+              assert(SDL_abs(h.cy[1]+20500)<=20 && h.rp_n[1]==0 && access(restfile,F_OK)!=0);
+              u=sweep(&h,u,1000,-20500,0,-1,300);
+              u=feed(&h,u,0,-1,1000,10,NULL,NULL); assert(h.cy[1]!=0);          /* no fast snap */
+              u=feed(&h,u,0,-1,2300,10,NULL,NULL); assert(h.cy[1]==0);          /* released after 3 s of rest */
+              unsetenv("BB_STICK_REST_MEMORY");
+              PadCal mm; cal_connect(&mm,0); assert(mm.mem==1);
+              /* detection off (BB_STICK_AUTOCENTER=0) also means no memory */
+              mm.auto_state=2; assert(!cal_memory_on(&mm)); }
+        }
     }
     /* through the SDL gamepad: untouched stick with a rest offset sends exactly 128 */
     SDL_SetJoystickVirtualAxis(joystick,SDL_GAMEPAD_AXIS_RIGHTX,3000);
@@ -282,5 +417,6 @@ int main(void) {
     SDL_Quit();
     unlink(path);
     unlink(config);
+    unlink(restfile);
     puts("PASS: pad ABI, debug camera chord, left/right clicks, SDL touch, vibration controls, overlay capture");
 }

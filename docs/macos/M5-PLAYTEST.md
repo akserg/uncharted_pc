@@ -109,8 +109,14 @@ position and corrects for it; full deflection still reaches the full range.
   `Runtime: stick centre recalibrated: left (x,y) right (x,y)`. A stick that is at rest at its true centre
   (inside the deadzone) goes back to centre (0,0). F9 is also the pad recorder's key: with `BB_PAD_RECORD` set it
   keeps that job and the recentre key is off (use the chord).
-- **Automatic release**: if the stick later rests at the true centre for 3 s, the correction is dropped
-  (`Runtime: stick centre reset (stick returned to centre)`).
+- **Rest-point memory (round 8)**: the port remembers up to 4 places where each stick got stuck (learned by the 3 s
+  detection above) and the true centre. When the stick has been still for 250 ms at one of them, the correction
+  snaps to it at once: no 3 s of camera drift when the stick falls back to centre or into the fault. This replaces
+  the 3 s automatic release. Learned points are saved per controller in `user/pad_rest_points.txt` and loaded at
+  connect (`Runtime: stick rest points loaded: left 0 right N`), so even the first stuck episode of a session is
+  caught in 250 ms. `BB_STICK_REST_MEMORY=0` turns it all off (and brings back the old 3 s release). Delete
+  `user/pad_rest_points.txt` to forget the points. With `BB_PAD_LOG=1` each snap is logged:
+  `Runtime: stick centre snapped to rest point k (x,y) (right stick)`.
 - A rest point beyond 85 % of the range is refused (log says why).
 - `BB_PAD_LOG=1` shows the centre in each `PAD:` line (`centre r=(x,y) l=(x,y)`).
 
@@ -121,6 +127,17 @@ Check: run with `BB_PAD_LOG=1`, leave the sticks alone 10 s, then `grep -E 'stic
 wait 4 s: expect `stick centre recalibrated ... (auto, stuck 3 s)`. Then press fn+F9 and, separately, hold
 LB + RB + right-stick click for 2 s. `BB_PAD_LOG=1` also prints `PADBTN:` lines for every button press/release the
 backend delivers (press View once to see whether it arrives at all).
+
+**Round 8 check (rest-point memory):** run with `BB_PAD_LOG=1 ./run.sh` (plus the usual variables). 1) Play or
+move the camera until the right stick gets stuck once, and wait 4 s: `stick centre recalibrated ... (auto, stuck 3 s)`
+(the first time only), and `user/pad_rest_points.txt` now has a line for your controller (`cat` it). 2) Now let the
+stick fall back to centre and push it into the fault again several times: the camera should stop creeping within
+about a quarter of a second each time, and `grep 'snapped to rest point' user/last_run.log` lists the snaps (no new
+`recalibrated` lines for places already learned, no `centre reset` lines). 3) Quit and start again: the log has
+`stick rest points loaded: left 0 right N`, and the first stuck episode is also fixed in a quarter of a second.
+4) Report anything that feels wrong: camera that jumps or a stick that feels dead while held still at one point
+(F9 or the chord re-centres, deleting `user/pad_rest_points.txt` forgets everything). Copy the log:
+`cp user/last_run.log ~/Desktop/m5-round8.log` and `cp user/pad_rest_points.txt ~/Desktop/`.
 
 
 ## Input while another app is in front (triage round 6)

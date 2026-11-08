@@ -104,8 +104,10 @@ static int stick_deadzone_setting(const char *name, int fallback) {
  * and within CAL_STUCK_SPREAD (+-64) on both axes for 3 s is stuck (on MFi SDL reports 0 until the first real
  * stick event, so the fault only shows after the first movement: a connect-only window never sees it),
  * (2) on demand: F9 (a window key event) or LB + RB + right-stick click, or View + right-stick click,
- * held 1 s, and dropped again (3) when the raw stick rests near the true centre for 3 s although the
- * corrected output would be a big deflection (the fault has cleared). Time-dependent functions take `now` (us). */
+ * held 1 s, and (3) with BB_STICK_REST_MEMORY=0 dropped again when the raw stick rests near the true centre
+ * for 3 s although the corrected output would be a big deflection (the fault has cleared; with the rest-point
+ * memory on, the return to the true centre is a fast snap instead, see REST_*). Time-dependent functions
+ * take `now` (us). */
 #define CAL_LIMIT 0.85            /* refuse a centre beyond this fraction of full range */
 #define CAL_STUCK_US 3000000u     /* raw constant for this long, outside the deadzone -> stuck */
 #define CAL_STUCK_SPREAD 128      /* max-min allowed over the run, per axis (+-64) */
@@ -113,6 +115,20 @@ static int stick_deadzone_setting(const char *name, int fallback) {
 #define CAL_RELEASE_US 3000000u   /* raw at the true centre for this long -> centre reset */
 #define CAL_RELEASE_FRAC 0.25     /* ... if the corrected output would exceed this fraction of full range */
 #define CAL_CHORD_US 1000000u     /* LB + RB + right-stick click, or View + right-stick click */
+/* Rest-point memory (triage round 8). A stuck stick alternates between a few rest points (the owner's right
+ * stick: true centre and about (1000,-20500)). Up to REST_MAX learned points per stick, plus the true centre
+ * (0,0), which is always known. A point is learned when stuck detection (3 s) captures it; points within
+ * REST_MERGE of each other are one point (the most recent value is kept). When the raw value has been still
+ * for REST_STILL_US (max-min <= REST_SPREAD on both axes) and lies within REST_RADIUS of a known point, the
+ * centre snaps to the exact current value of that point (true centre: back to (0,0)), so a switch between
+ * rest points costs a quarter of a second instead of 3 s. Learned points are kept per controller in
+ * user/pad_rest_points.txt (BB_PAD_REST_FILE, BB_USER_DIR). BB_STICK_REST_MEMORY=0 turns the memory, the
+ * snapping and the file off and brings back the round-5 auto-release. */
+#define REST_MAX 4
+#define REST_MERGE 3000
+#define REST_RADIUS 3000
+#define REST_STILL_US 250000u
+#define REST_SPREAD 192
 typedef struct {
     int cx[2], cy[2];             /* [0] left, [1] right stick */
     int auto_state;               /* 1 stuck-stick detection on, 2 off (BB_STICK_AUTOCENTER=0) */
@@ -120,6 +136,10 @@ typedef struct {
     uint64_t run_since[2];        /* start of the current constant run per stick, 0 = none */
     int rmin[2][2], rmax[2][2]; long long rsum[2][2]; int rn[2]; int refused[2];
     int chord_fired;
+    int mem;                      /* rest-point memory on (BB_STICK_REST_MEMORY, default on) */
+    int rp_n[2], rp_x[2][REST_MAX], rp_y[2][REST_MAX]; unsigned rp_seq[2][REST_MAX], seq;
+    uint64_t still_since[2]; int smin[2][2], smax[2][2]; long long ssum[2][2]; int sn[2];
+    char key[72];                 /* controller id for the rest-point file, "" = no file */
 } PadCal;
 static PadCal cal;
 static int16_t stick_calibrate_axis(int v, int c) {
@@ -142,6 +162,80 @@ static void cal_connect(PadCal *c, uint64_t now) {
     memset(c,0,sizeof(*c));
     (void)now;
     c->auto_state=autocentre_enabled() ? 1 : 2;
+    const char *m=getenv("BB_STICK_REST_MEMORY");
+    c->mem=!(m && m[0]=='0');
+}
+/* Snapping and learning only run with detection on: the memory is part of it. Otherwise round-5 release. */
+static int cal_memory_on(const PadCal *c) { return c->mem && c->auto_state==1; }
+static double hypot_i(double x, double y) { return SDL_sqrt(x*x+y*y); }
+static const char *rest_file(void) {
+    static char buf[512];
+    const char *f=getenv("BB_PAD_REST_FILE"), *d=getenv("BB_USER_DIR");
+    if (f && *f) return f;
+    snprintf(buf,sizeof buf,"%s/pad_rest_points.txt",d && *d ? d : "user");
+    return buf;
+}
+/* File lines: "<controller> <stick 0 left|1 right> <x> <y>" ('#' lines are comments). One controller's lines
+ * are replaced as a whole on save, other controllers' lines are kept. */
+static void rest_load(PadCal *c) {
+    if (!cal_memory_on(c) || !c->key[0]) return;
+    FILE *f=fopen(rest_file(),"r");
+    if (!f) return;
+    char line[256];
+    while (fgets(line,sizeof line,f)) {
+        char k[96]; int s, x, y;
+        if (line[0]=='#' || sscanf(line,"%95s %d %d %d",k,&s,&x,&y)!=4) continue;
+        if (strcmp(k,c->key) || s<0 || s>1 || c->rp_n[s]>=REST_MAX) continue;
+        if (x<-32768 || x>32767 || y<-32768 || y>32767) continue;
+        c->rp_x[s][c->rp_n[s]]=x; c->rp_y[s][c->rp_n[s]]=y; c->rp_seq[s][c->rp_n[s]]=++c->seq; ++c->rp_n[s];
+    }
+    fclose(f);
+    if (c->rp_n[0] || c->rp_n[1])
+        printf("Runtime: stick rest points loaded: left %d right %d (%s)\n",c->rp_n[0],c->rp_n[1],rest_file());
+}
+static void rest_save(const PadCal *c) {
+    if (!cal_memory_on(c) || !c->key[0]) return;
+    const char *path=rest_file();
+    char tmp[600], others[64][256];
+    int n=0;
+    snprintf(tmp,sizeof tmp,"%s.tmp",path);
+    FILE *f=fopen(path,"r");
+    if (f) {
+        char line[256], k[96]; int s, x, y;
+        while (n<64 && fgets(line,sizeof line,f))
+            if (line[0]!='#' && sscanf(line,"%95s %d %d %d",k,&s,&x,&y)==4 && strcmp(k,c->key)) strcpy(others[n++],line);
+        fclose(f);
+    }
+    f=fopen(tmp,"w");
+    if (!f) { static int warned; if (!warned) { warned=1; printf("Runtime: stick rest points not saved (cannot write %s)\n",tmp); } return; }
+    fputs("# stick rest points: <controller vid:pid:guid> <stick 0 left 1 right> <x> <y> (uncharted_pc, triage round 8)\n",f);
+    for (int i=0;i<n;++i) fputs(others[i],f);
+    for (int s=0;s<2;++s) for (int i=0;i<c->rp_n[s];++i) fprintf(f,"%s %d %d %d\n",c->key,s,c->rp_x[s][i],c->rp_y[s][i]);
+    fclose(f);
+    rename(tmp,path);
+}
+/* Learns (x,y) as a rest point of stick s: merged with a point within REST_MERGE (the new value wins), else
+ * added, the oldest one dropped when REST_MAX is reached. */
+static void rest_learn(PadCal *c, int s, int x, int y) {
+    if (!cal_memory_on(c)) return;
+    int k=-1; double bd=1e9;
+    for (int i=0;i<c->rp_n[s];++i) {
+        const double d=hypot_i(x-c->rp_x[s][i],y-c->rp_y[s][i]);
+        if (d<=REST_MERGE && d<bd) { bd=d; k=i; }
+    }
+    if (k<0) {
+        if (c->rp_n[s]<REST_MAX) k=c->rp_n[s]++;
+        else { k=0; for (int i=1;i<REST_MAX;++i) if (c->rp_seq[s][i]<c->rp_seq[s][k]) k=i; }
+    }
+    c->rp_x[s][k]=x; c->rp_y[s][k]=y; c->rp_seq[s][k]=++c->seq;
+    for (int i=c->rp_n[s]-1;i>=0;--i) {          /* others now within REST_MERGE of it are the same point */
+        if (i==k || hypot_i(x-c->rp_x[s][i],y-c->rp_y[s][i])>REST_MERGE) continue;
+        const int last=c->rp_n[s]-1;
+        c->rp_x[s][i]=c->rp_x[s][last]; c->rp_y[s][i]=c->rp_y[s][last]; c->rp_seq[s][i]=c->rp_seq[s][last];
+        if (k==last) k=i;
+        --c->rp_n[s];
+    }
+    rest_save(c);
 }
 static void cal_log(const PadCal *c, const char *suffix) {
     printf("Runtime: stick centre recalibrated: left (%d,%d) right (%d,%d)%s\n",c->cx[0],c->cy[0],c->cx[1],c->cy[1],suffix);
@@ -197,7 +291,44 @@ static void cal_stuck(PadCal *c, const int raw[4], const int dz[2], uint64_t now
         if (SDL_fabs(mx-c->cx[s])<=CAL_SAME_CENTRE && SDL_fabs(my-c->cy[s])<=CAL_SAME_CENTRE) continue; /* already centred */
         const int r=cal_capture(c,s,mx,my,dz[s]);
         if (r<0) c->refused[s]=1;
-        else if (r>0) cal_log(c," (auto, stuck 3 s)");
+        else if (r>0) { cal_log(c," (auto, stuck 3 s)"); rest_learn(c,s,c->cx[s],c->cy[s]); }
+    }
+}
+/* Fast settle: raw still for REST_STILL_US and within REST_RADIUS of a known rest point -> the centre snaps to
+ * that point (its exact current value; the true centre goes back to (0,0)). Silent unless BB_PAD_LOG=1. */
+static void cal_snap(PadCal *c, const int raw[4], const int dz[2], uint64_t now) {
+    for (int s=0;s<2;++s) {
+        const int v[2]={raw[2*s],raw[2*s+1]};
+        int restart=!c->still_since[s];
+        if (!restart) {
+            for (int i=0;i<2;++i) {
+                if (v[i]<c->smin[s][i]) c->smin[s][i]=v[i];
+                if (v[i]>c->smax[s][i]) c->smax[s][i]=v[i];
+                if (c->smax[s][i]-c->smin[s][i]>REST_SPREAD) restart=1;
+            }
+        }
+        if (restart) {
+            c->still_since[s]=now; c->sn[s]=1;
+            for (int i=0;i<2;++i) { c->smin[s][i]=c->smax[s][i]=v[i]; c->ssum[s][i]=v[i]; }
+            continue;
+        }
+        ++c->sn[s];
+        for (int i=0;i<2;++i) c->ssum[s][i]+=v[i];
+        if (now-c->still_since[s]<REST_STILL_US) continue;
+        const int mx=(int)SDL_lround((double)c->ssum[s][0]/c->sn[s]), my=(int)SDL_lround((double)c->ssum[s][1]/c->sn[s]);
+        int best=-1; double bd=hypot_i(mx,my);                     /* -1: the true centre */
+        for (int i=0;i<c->rp_n[s];++i) {
+            const double d=hypot_i(mx-c->rp_x[s][i],my-c->rp_y[s][i]);
+            if (d<bd) { bd=d; best=i; }
+        }
+        if (bd>REST_RADIUS) continue;
+        int tx=mx, ty=my;
+        if (best<0 || hypot_i(mx,my)<=(double)dz[s]) tx=ty=0;
+        if (hypot_i(tx,ty)>CAL_LIMIT*32767.0) continue;
+        if (SDL_abs(tx-c->cx[s])<=CAL_SAME_CENTRE && SDL_abs(ty-c->cy[s])<=CAL_SAME_CENTRE) continue;
+        c->cx[s]=tx; c->cy[s]=ty; c->rest_since[s]=0;
+        if (getenv("BB_PAD_LOG") && getenv("BB_PAD_LOG")[0]=='1')
+            printf("Runtime: stick centre snapped to rest point %d (%d,%d) (%s stick)\n",best+1,tx,ty,s ? "right" : "left");
     }
 }
 /* A calibrated stick whose raw value rests within the deadzone of the true centre for CAL_RELEASE_US while
@@ -217,6 +348,11 @@ static void cal_release(PadCal *c, const int raw[4], const int dz[2], uint64_t n
             puts("Runtime: stick centre reset (stick returned to centre)");
         }
     }
+}
+/* One calibration step per sample: stuck detection, then snapping (memory on) or the round-5 release. */
+static void cal_update(PadCal *c, const int raw[4], const int dz[2], uint64_t now) {
+    cal_stuck(c,raw,dz,now);
+    if (cal_memory_on(c)) cal_snap(c,raw,dz,now); else cal_release(c,raw,dz,now);
 }
 static uint8_t trigger(int16_t v) { int x=v>>7; return (uint8_t)(x<0 ? 0 : x>255 ? 255 : x); }
 static uint16_t touch_axis(float v, int max) {
@@ -268,6 +404,10 @@ static SDL_Gamepad *current_gamepad(void) {
             if (gamepad) {
                 ++connected_count;
                 cal_connect(&cal,now_us());
+                snprintf(cal.key,sizeof cal.key,"%04x:%04x:",SDL_GetGamepadVendor(gamepad),SDL_GetGamepadProduct(gamepad));
+                SDL_GUIDToString(SDL_GetJoystickGUID(SDL_GetGamepadJoystick(gamepad)),cal.key+strlen(cal.key),
+                                 (int)(sizeof cal.key-strlen(cal.key)));
+                rest_load(&cal);
                 printf("Runtime: gamepad connected: %s\n",SDL_GetGamepadName(gamepad));
                 log_gamepad_backend(gamepad);
             }
@@ -1116,8 +1256,7 @@ static void sample_host(PadData *d) {
             }
         }
         if (pad_log) log_pad_buttons(g);
-        cal_stuck(&cal,raw4,dz2,now);
-        cal_release(&cal,raw4,dz2,now);
+        cal_update(&cal,raw4,dz2,now);
         int16_t clx, cly, crx, cry;
         stick_calibrate(rlx,rly,cal.cx[0],cal.cy[0],&clx,&cly);
         stick_calibrate(rrx,rry,cal.cx[1],cal.cy[1],&crx,&cry);
