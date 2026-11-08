@@ -421,3 +421,13 @@ Next: optional rest-centre calibration in the port as a workaround (owner reques
 **Logs.** Once: `Runtime: mouse capture on first click (BB_MOUSE_CAPTURE_AT_LAUNCH=1 for capture at launch)` and `Runtime: SDL relative mouse mode at launch: off|on`. With `BB_KEY_LOG=1`: `Mouse: arm|disarm|capture|release (<reason>)`.
 
 **Verified (U1 to START, shell, `user/m5-round7-run.log`).** Both Runtime lines present, relative mode `off`, no `Mouse: capture` line without input. Tests: `ROSETTA_ADVERTISE_AVX=1 bash build.sh --test` exit 0, 18 PASS, -Werror on. **Not verified from the shell:** clicking, W/A/S/D and focus changes (need a human).
+
+#### Owner session 4 (2026-11-07/08, log `user/m5-mouse-check.log`, analysed by the reviewer)
+- Owner: "game played well", **reached chapter 7**, **sound and gameplay fine**. Round 7 verified: pointer free at
+  launch, `arm (mouse click (consumed))` → capture, Left Option and focus loss release, W/A/S/D re-arms.
+- Stick drift still annoying at times. Analysis of 11,464 PAD samples: the right stick alternates between **two rest
+  states**: true centre (`|ry| < 3000`, 3,226 samples) and stuck (`ry ≈ -19,500…-19,800`, `rx` -2,000…+4,300; 3,605
+  samples). The log has **109** auto-captures and **24** auto-releases. Every switch between the two states costs
+  ~3 s of camera drift before stuck detection (or auto-release) catches up, about 130 drift episodes in the session.
+- Left stick: 7 refused captures at `ly = -32768` (the owner holding forward); correct.
+- Next: triage round 8 — remember both rest points and snap to them quickly.
