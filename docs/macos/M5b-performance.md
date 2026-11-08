@@ -11,8 +11,10 @@ The likely limit is the GPU command thread (shadPS4 Liverpool command processing
 
 ## Preconditions
 - M5 playable (see M5 status). Owner's `user/` profile and save data in place.
-- **Work in a separate git worktree** (`../uncharted_pc-perf`, branch `macos-perf` from `macos`) so the owner can
-  keep playing builds from the main checkout. Share `$BB_DEPS` and the Vulkan SDK; the worktree gets its own `out/`
+- **Work in a separate git worktree** (`../uncharted_pc-perf`, branch `macos-perf` from `macos`) so builds and
+  save data stay apart. The worktree does NOT make concurrent play possible: **benchmarks need an idle machine** —
+  no second bb-probe (the owner's game shares GPU/CPU, and with background controller events the owner's pad also
+  drives the replay copy) and no Unity compiles. The owner doesn't play while benchmarks run. Share `$BB_DEPS` and the Vulkan SDK; the worktree gets its own `out/`
   and its own `user/` copy (copy the owner's `user/` once, never write back).
 
 ## Tasks
