@@ -224,11 +224,13 @@ int main(void) {
         c.auto_state=2;
         for (int i=0;i<400;++i,t+=16667) { int raw[4]={0,0,0,-21000}; cal_stuck(&c,raw,dz2,t); }
         assert(c.cy[1]==0);
-        /* the left stick is detected too, independently */
+        /* the left stick is detected too, independently (BB_STICK_FIX=both) */
+        set_env("BB_STICK_FIX","both");
         cal_connect(&c,t); c.auto_state=1;
         for (int i=0;i<300;++i,t+=16667) { int raw[4]={12000,3000,0,0}; cal_stuck(&c,raw,dz2,t); }
         assert(c.cx[0]==12000 && c.cy[0]==3000 && c.cx[1]==0 && c.cy[1]==0);
         c.cx[0]=c.cy[0]=0;
+        unsetenv("BB_STICK_FIX");
         /* re-centre: -23630 then F9 at -20840 */
         c.cx[1]=0; c.cy[1]=-23630;
         { int raw[4]={0,0,0,-20840}; cal_recentre(&c,raw,dz2,""); }
@@ -477,6 +479,51 @@ int main(void) {
                   assert(v.cx[1]==0 && v.cy[1]==0);
                   u=feed(&v,1000000,0,-1,600,10,NULL,NULL); assert(v.cx[1]==0 && v.cy[1]==0); }
                 puts("PASS: stick dead corridor (slide stays centre, full deflection, monotonic, no jump, byte-identical without a point or with BB_STICK_CORRIDOR=0)");
+                /* triage round 9b: BB_STICK_FIX selects the sticks the fix runs on */
+                {
+                    static const int dzf[2]={7849,8689};
+                    const int HOLD_Y=-19660;                                  /* a steady 60 % left-stick walk */
+                    set_env("BB_STICK_FIX","right");
+                    { PadCal w; cal_connect(&w,0); w.auto_state=1; assert(w.fix==2);
+                      uint64_t u=1000000;
+                      for (int k=0;k<600;++k,u+=SAMPLE_US) { const int raw[4]={((k%3)-1)*20,HOLD_Y+(((k/3)%3)-1)*20,0,-1}; cal_update(&w,raw,dzf,u); }
+                      assert(w.cx[0]==0 && w.cy[0]==0 && w.rp_n[0]==0 && !cor_any(&w,0));
+                      for (int x=-32768; x<=32767; x+=1111) for (int y=-32768; y<=32767; y+=1109) {
+                          int16_t ox, oy, qx, qy;
+                          stick_output(&w,0,(int16_t)x,(int16_t)y,dzf[0],&ox,&oy);
+                          stick_calibrate((int16_t)x,(int16_t)y,0,0,&qx,&qy); stick_deadzone(qx,qy,dzf[0],&qx,&qy);
+                          assert(ox==qx && oy==qy);                           /* round-2 deadzone only */
+                      }
+                      /* the manual re-centre still works on the unselected stick */
+                      { int raw[4]={0,-20000,0,0}; cal_recentre(&w,raw,dzf,""); assert(w.cy[0]==-20000); } }
+                    /* both: the same hold is captured (old behaviour) */
+                    set_env("BB_STICK_FIX","both");
+                    { PadCal w; cal_connect(&w,0); w.auto_state=1; assert(w.fix==3);
+                      uint64_t u=1000000;
+                      for (int k=0;k<600;++k,u+=SAMPLE_US) { const int raw[4]={((k%3)-1)*20,HOLD_Y+(((k/3)%3)-1)*20,0,-1}; cal_update(&w,raw,dzf,u); }
+                      assert(SDL_abs(w.cy[0]-HOLD_Y)<=30 && w.rp_n[0]==1 && cor_any(&w,0)); }
+                    set_env("BB_STICK_FIX","left");  { PadCal w; cal_connect(&w,0); assert(w.fix==1); }
+                    set_env("BB_STICK_FIX","none");  { PadCal w; cal_connect(&w,0); assert(w.fix==0); }
+                    /* a left-stick line with fix=right: ignored on load, and it stays in the file after a save */
+                    set_env("BB_STICK_FIX","right");
+                    {
+                        char rf2[]="bbport-rest-test9b-XXXXXX";
+                        int fd=mkstemp(rf2); assert(fd>=0); close(fd);
+                        set_env("BB_PAD_REST_FILE",rf2);
+                        FILE *f=fopen(rf2,"w"); assert(f);
+                        fputs("test:0009:guidL 0 1000 -19000\ntest:0009:guidL 1 0 -20000\n",f); fclose(f);
+                        PadCal w; cal_connect(&w,0); w.auto_state=1; strcpy(w.key,"test:0009:guidL"); rest_load(&w);
+                        assert(w.rp_n[0]==0 && w.rp_n[1]==1);
+                        uint64_t u=feed(&w,1000000,0,-1,500,10,NULL,NULL);
+                        u=feed(&w,u,2000,-15000,3300,10,NULL,NULL); assert(w.rp_n[1]==2);   /* learning saves the file */
+                        char buf[800]; f=fopen(rf2,"r"); assert(f); size_t nb=fread(buf,1,sizeof buf-1,f); buf[nb]=0; fclose(f);
+                        assert(strstr(buf,"test:0009:guidL 0 1000 -19000"));
+                        unlink(rf2);
+                        set_env("BB_PAD_REST_FILE",restfile);
+                    }
+                    unsetenv("BB_STICK_FIX");
+                    puts("PASS: BB_STICK_FIX (right: left-stick hold untouched, no rest points, line kept in the file; both: old behaviour)");
+                }
             }
         }
     }

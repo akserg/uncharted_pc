@@ -140,6 +140,7 @@ typedef struct {
     int rp_n[2], rp_x[2][REST_MAX], rp_y[2][REST_MAX]; unsigned rp_seq[2][REST_MAX], seq;
     uint64_t still_since[2]; int smin[2][2], smax[2][2]; long long ssum[2][2]; int sn[2];
     int corr;                     /* dead corridors on (BB_STICK_CORRIDOR, default on for macOS), needs the memory */
+    int fix;                      /* sticks the fix runs on (BB_STICK_FIX): bit 0 left, bit 1 right */
     char key[72];                 /* controller id for the rest-point file, "" = no file */
 } PadCal;
 static PadCal cal;
@@ -159,9 +160,29 @@ static int autocentre_enabled(void) {
     return 0;
 #endif
 }
+/* BB_STICK_FIX: right (default on macOS), left, both, none. Sticks not selected keep only the radial deadzone and
+ * the manual re-centre: no stuck detection, rest memory, snapping or corridor, and no rest-point file use. */
+static const char *stick_fix_name(void) {
+    const char *v=getenv("BB_STICK_FIX");
+    if (v && *v) {
+        if (!strcmp(v,"left") || !strcmp(v,"right") || !strcmp(v,"both") || !strcmp(v,"none")) return v;
+        static int warned; if (!warned) { warned=1; printf("Runtime: BB_STICK_FIX=%s not understood (right, left, both, none)\n",v); }
+    }
+#ifdef __APPLE__
+    return "right";
+#else
+    return "both";
+#endif
+}
+static int stick_fix_mask(void) {
+    const char *v=stick_fix_name();
+    return !strcmp(v,"both") ? 3 : !strcmp(v,"left") ? 1 : !strcmp(v,"right") ? 2 : 0;
+}
+static int fix_on(const PadCal *c, int s) { return (c->fix>>s)&1; }
 static void cal_connect(PadCal *c, uint64_t now) {
     memset(c,0,sizeof(*c));
     (void)now;
+    c->fix=stick_fix_mask();
     c->auto_state=autocentre_enabled() ? 1 : 2;
     const char *m=getenv("BB_STICK_REST_MEMORY");
     c->mem=!(m && m[0]=='0');
@@ -193,6 +214,10 @@ static void rest_load(PadCal *c) {
         char k[96]; int s, x, y;
         if (line[0]=='#' || sscanf(line,"%95s %d %d %d",k,&s,&x,&y)!=4) continue;
         if (strcmp(k,c->key) || s<0 || s>1 || c->rp_n[s]>=REST_MAX) continue;
+        if (!fix_on(c,s)) {
+            static int logged; if (!logged) { logged=1; printf("Runtime: stick rest points of the %s stick ignored (BB_STICK_FIX=%s), kept in %s\n",s ? "right" : "left",stick_fix_name(),rest_file()); }
+            continue;
+        }
         if (x<-32768 || x>32767 || y<-32768 || y>32767) continue;
         c->rp_x[s][c->rp_n[s]]=x; c->rp_y[s][c->rp_n[s]]=y; c->rp_seq[s][c->rp_n[s]]=++c->seq; ++c->rp_n[s];
     }
@@ -210,7 +235,7 @@ static void rest_save(const PadCal *c) {
     if (f) {
         char line[256], k[96]; int s, x, y;
         while (n<64 && fgets(line,sizeof line,f))
-            if (line[0]!='#' && sscanf(line,"%95s %d %d %d",k,&s,&x,&y)==4 && strcmp(k,c->key)) strcpy(others[n++],line);
+            if (line[0]!='#' && sscanf(line,"%95s %d %d %d",k,&s,&x,&y)==4 && (strcmp(k,c->key) || ((s==0 || s==1) && !fix_on(c,s)))) strcpy(others[n++],line);
         fclose(f);
     }
     f=fopen(tmp,"w");
@@ -224,7 +249,7 @@ static void rest_save(const PadCal *c) {
 /* Learns (x,y) as a rest point of stick s: merged with a point within REST_MERGE (the new value wins), else
  * added, the oldest one dropped when REST_MAX is reached. */
 static void rest_learn(PadCal *c, int s, int x, int y) {
-    if (!cal_memory_on(c)) return;
+    if (!cal_memory_on(c) || !fix_on(c,s)) return;
     int k=-1; double bd=1e9;
     for (int i=0;i<c->rp_n[s];++i) {
         const double d=hypot_i(x-c->rp_x[s][i],y-c->rp_y[s][i]);
@@ -304,7 +329,7 @@ static double cor_nearest(int px, int py, int dz, double x, double y, double *nx
 }
 /* 1 if raw (x,y) of stick s lies inside any of its corridors. */
 static int cor_inside(const PadCal *c, int s, int dz, double x, double y) {
-    if (!cor_enabled(c)) return 0;
+    if (!cor_enabled(c) || !fix_on(c,s)) return 0;
     for (int i=0;i<c->rp_n[s];++i) {
         double nx, ny;
         if (cor_eligible(c->rp_x[s][i],c->rp_y[s][i]) && cor_nearest(c->rp_x[s][i],c->rp_y[s][i],dz,x,y,&nx,&ny)==0.0) return 1;
@@ -312,6 +337,7 @@ static int cor_inside(const PadCal *c, int s, int dz, double x, double y) {
     return 0;
 }
 static int cor_any(const PadCal *c, int s) {
+    if (!fix_on(c,s)) return 0;
     for (int i=0;i<c->rp_n[s];++i) if (cor_eligible(c->rp_x[s][i],c->rp_y[s][i])) return 1;
     return 0;
 }
@@ -324,7 +350,7 @@ static void cor_log(int s, int px, int py, int dz) {
 static void cor_log_all(const PadCal *c, const int dz[2]) {
     if (!cor_enabled(c)) return;
     for (int s=0;s<2;++s)
-        for (int i=0;i<c->rp_n[s];++i)
+        for (int i=0;fix_on(c,s) && i<c->rp_n[s];++i)
             if (cor_eligible(c->rp_x[s][i],c->rp_y[s][i])) cor_log(s,c->rp_x[s][i],c->rp_y[s][i],dz[s]);
 }
 /* The round-8 pipeline (centre, calibration, scaled deadzone) in floating point, unrounded. */
@@ -374,6 +400,7 @@ static void stick_output(const PadCal *c, int s, int16_t x, int16_t y, int dz, i
 static void cal_stuck(PadCal *c, const int raw[4], const int dz[2], uint64_t now) {
     if (c->auto_state!=1) return;
     for (int s=0;s<2;++s) {
+        if (!fix_on(c,s)) continue;
         const int v[2]={raw[2*s],raw[2*s+1]};
         if (SDL_sqrt((double)v[0]*v[0]+(double)v[1]*v[1])<=(double)dz[s]) { c->run_since[s]=0; c->refused[s]=0; continue; }
         int restart=!c->run_since[s];
@@ -407,6 +434,7 @@ static void cal_stuck(PadCal *c, const int raw[4], const int dz[2], uint64_t now
  * that point (its exact current value; the true centre goes back to (0,0)). Silent unless BB_PAD_LOG=1. */
 static void cal_snap(PadCal *c, const int raw[4], const int dz[2], uint64_t now) {
     for (int s=0;s<2;++s) {
+        if (!fix_on(c,s)) continue;
         const int v[2]={raw[2*s],raw[2*s+1]};
         int restart=!c->still_since[s];
         if (!restart) {
@@ -446,7 +474,7 @@ static void cal_snap(PadCal *c, const int raw[4], const int dz[2], uint64_t now)
  * the corrected output would be a big deflection has sprung back: drop the centre (no reverse drift). */
 static void cal_release(PadCal *c, const int raw[4], const int dz[2], uint64_t now) {
     for (int s=0;s<2;++s) {
-        if (!c->cx[s] && !c->cy[s]) { c->rest_since[s]=0; continue; }
+        if (!fix_on(c,s) || (!c->cx[s] && !c->cy[s])) { c->rest_since[s]=0; continue; }
         const double rx=raw[2*s], ry=raw[2*s+1];
         int16_t ox, oy;
         stick_calibrate((int16_t)raw[2*s],(int16_t)raw[2*s+1],c->cx[s],c->cy[s],&ox,&oy);
@@ -522,6 +550,9 @@ static SDL_Gamepad *current_gamepad(void) {
                 { const int dz_log[2]={stick_deadzone_setting("BB_STICK_DEADZONE_LEFT",STICK_DEADZONE_LEFT),
                                        stick_deadzone_setting("BB_STICK_DEADZONE_RIGHT",STICK_DEADZONE_RIGHT)};
                   cor_log_all(&cal,dz_log); }
+                { const char *fx=stick_fix_name();
+                  printf("Runtime: stick fix on %s stick%s (BB_STICK_FIX=%s)\n",
+                         !strcmp(fx,"none") ? "no" : !strcmp(fx,"both") ? "both" : fx,!strcmp(fx,"none") ? "" : !strcmp(fx,"both") ? "s" : "",fx); }
                 printf("Runtime: gamepad connected: %s\n",SDL_GetGamepadName(gamepad));
                 log_gamepad_backend(gamepad);
             }

@@ -149,6 +149,12 @@ that the camera responds smoothly with no jump when you leave the dead zone. 4) 
 is round 8 again. 5) Copy the log: `cp user/last_run.log ~/Desktop/m5-round9.log`, and tell me whether up-looks feel too
 dead or the camera still moves by itself.
 
+**Round 9b (right stick only):** stuck detection, rest points, snapping and corridors now run on the **right stick only**
+(`BB_STICK_FIX=right`, default); the left stick keeps just the deadzone and F9. The connect log has
+`Runtime: stick fix on right stick (BB_STICK_FIX=right)`. Check: walk with a steady 60 % left push for 10 s or more and
+confirm `user/pad_rest_points.txt` gains no left-stick line and walking stays normal. `BB_STICK_FIX=both` brings the
+old behaviour back.
+
 
 ## Input while another app is in front (triage round 6)
 - The **controller keeps working while another app is frontmost** (Unity Editor, Terminal, Finder): the port sets
