@@ -139,6 +139,7 @@ typedef struct {
     int mem;                      /* rest-point memory on (BB_STICK_REST_MEMORY, default on) */
     int rp_n[2], rp_x[2][REST_MAX], rp_y[2][REST_MAX]; unsigned rp_seq[2][REST_MAX], seq;
     uint64_t still_since[2]; int smin[2][2], smax[2][2]; long long ssum[2][2]; int sn[2];
+    int corr;                     /* dead corridors on (BB_STICK_CORRIDOR, default on for macOS), needs the memory */
     char key[72];                 /* controller id for the rest-point file, "" = no file */
 } PadCal;
 static PadCal cal;
@@ -164,6 +165,12 @@ static void cal_connect(PadCal *c, uint64_t now) {
     c->auto_state=autocentre_enabled() ? 1 : 2;
     const char *m=getenv("BB_STICK_REST_MEMORY");
     c->mem=!(m && m[0]=='0');
+    const char *k=getenv("BB_STICK_CORRIDOR");
+#ifdef __APPLE__
+    c->corr=!(k && *k && k[0]=='0');
+#else
+    c->corr=k && *k && k[0]!='0';
+#endif
 }
 /* Snapping and learning only run with detection on: the memory is part of it. Otherwise round-5 release. */
 static int cal_memory_on(const PadCal *c) { return c->mem && c->auto_state==1; }
@@ -262,6 +269,105 @@ static void cal_recentre(PadCal *c, const int raw[4], const int dz[2], const cha
     for (int s=0;s<2;++s) cal_capture(c,s,raw[2*s],raw[2*s+1],dz[s]);
     cal_log(c,suffix);
 }
+/* ---- dead corridor (triage round 9) --------------------------------------------------------------------
+ * After a release the faulty stick does not jump to its stuck point, it slides there from the centre over 2-4 s,
+ * and a sliding stick is never still, so no snap can happen on the way. For each learned rest point P of a stick
+ * the raw segment (0,0)->P is therefore a dead corridor: a raw value inside it sends the centre, whatever the
+ * snapped centre is. The corridor is that segment widened by +-W perpendicular to it, and extended past P by
+ * COR_EXTEND, with flat ends (a round cap would eat the last quarter of the range). W = max(the stick's deadzone,
+ * 1.5 x COR_SLIDE_DEV); COR_SLIDE_DEV is the largest distance from the line (0,0)->P of any sample on a clean
+ * centre->stuck slide in user/m5-round8-check-1/2.log (131 samples on 29 slides: 2906, at (-1773,-20535); the
+ * rest points themselves spread x -1773..3948), so the deadzone (8689 > 4359) decides on this controller.
+ * Outside every corridor the round-8 pipeline runs (centre, calibration, deadzone) and its output is rescaled
+ * against the pipeline's output at the nearest corridor point n(v): o' = (o(v) - o(n)) / (1 - |o(n)|/32767),
+ * so it is 0 on the edge (no jump, for any snapped centre) and a full deflection still reaches 0/255.
+ * Only points 30 %..85 % of the range from (0,0) get a corridor (nearer: the deadzone covers it; beyond 85 %:
+ * refused as a centre anyway). */
+#define COR_MIN_FRAC 0.30
+#define COR_EXTEND 1500
+#define COR_SLIDE_DEV 2906
+static int cor_enabled(const PadCal *c) { return c->corr && cal_memory_on(c); }
+static int cor_eligible(int px, int py) {
+    const double d=hypot_i(px,py);
+    return d>=COR_MIN_FRAC*32767.0 && d<=CAL_LIMIT*32767.0;
+}
+static double cor_halfwidth(int dz) { const double w=1.5*COR_SLIDE_DEV; return w>dz ? w : dz; }
+/* Distance from (x,y) to corridor (0,0)->(px,py): 0 inside; else the nearest corridor point in *nx,*ny. */
+static double cor_nearest(int px, int py, int dz, double x, double y, double *nx, double *ny) {
+    const double l0=hypot_i(px,py), L=l0+COR_EXTEND, W=cor_halfwidth(dz);
+    const double ux=px/l0, uy=py/l0;
+    const double t=x*ux+y*uy, l=-x*uy+y*ux;
+    if (t>=0.0 && t<=L && SDL_fabs(l)<=W) { *nx=x; *ny=y; return 0.0; }
+    const double tc=t<0.0 ? 0.0 : t>L ? L : t, lc=l<-W ? -W : l>W ? W : l;
+    *nx=tc*ux-lc*uy; *ny=tc*uy+lc*ux;
+    return hypot_i(x-*nx,y-*ny);
+}
+/* 1 if raw (x,y) of stick s lies inside any of its corridors. */
+static int cor_inside(const PadCal *c, int s, int dz, double x, double y) {
+    if (!cor_enabled(c)) return 0;
+    for (int i=0;i<c->rp_n[s];++i) {
+        double nx, ny;
+        if (cor_eligible(c->rp_x[s][i],c->rp_y[s][i]) && cor_nearest(c->rp_x[s][i],c->rp_y[s][i],dz,x,y,&nx,&ny)==0.0) return 1;
+    }
+    return 0;
+}
+static int cor_any(const PadCal *c, int s) {
+    for (int i=0;i<c->rp_n[s];++i) if (cor_eligible(c->rp_x[s][i],c->rp_y[s][i])) return 1;
+    return 0;
+}
+static void cor_log(int s, int px, int py, int dz) {
+    printf("Runtime: stick corridor %s: (0,0)\xe2\x86\x92(%d,%d), half-width %d, up-look starts at %d%% travel\n",
+           s ? "right" : "left",px,py,(int)SDL_lround(cor_halfwidth(dz)),
+           (int)SDL_lround(100.0*(hypot_i(px,py)+COR_EXTEND)/32767.0));
+}
+/* Logs the corridor of every eligible learned point of both sticks (at connect, with the deadzones in use). */
+static void cor_log_all(const PadCal *c, const int dz[2]) {
+    if (!cor_enabled(c)) return;
+    for (int s=0;s<2;++s)
+        for (int i=0;i<c->rp_n[s];++i)
+            if (cor_eligible(c->rp_x[s][i],c->rp_y[s][i])) cor_log(s,c->rp_x[s][i],c->rp_y[s][i],dz[s]);
+}
+/* The round-8 pipeline (centre, calibration, scaled deadzone) in floating point, unrounded. */
+static void pipeline_d(const PadCal *c, int s, double x, double y, int dz, double *ox, double *oy) {
+    double v[2]={x,y};
+    const int ce[2]={c->cx[s],c->cy[s]};
+    for (int i=0;i<2;++i) {
+        const double o=v[i]>=ce[i] ? (v[i]-ce[i])*32767.0/(32767.0-ce[i]) : (v[i]-ce[i])*32768.0/(32768.0+ce[i]);
+        v[i]=o<-32768.0 ? -32768.0 : o>32767.0 ? 32767.0 : o;
+    }
+    const double m=hypot_i(v[0],v[1]);
+    if (dz>0) {
+        if (m<=(double)dz) v[0]=v[1]=0.0;
+        else { double sd=(m-dz)/(32767.0-dz)*32767.0; if (sd>32767.0) sd=32767.0; v[0]*=sd/m; v[1]*=sd/m; }
+    }
+    *ox=v[0]; *oy=v[1];
+}
+/* Raw int16 stick value -> the value the game gets (before axis()): centre, calibration, deadzone, corridor. */
+static void stick_output(const PadCal *c, int s, int16_t x, int16_t y, int dz, int16_t *ox, int16_t *oy) {
+    int16_t qx, qy;
+    stick_calibrate(x,y,c->cx[s],c->cy[s],&qx,&qy);
+    stick_deadzone(qx,qy,dz,&qx,&qy);
+    *ox=qx; *oy=qy;
+    if (!cor_enabled(c) || !cor_any(c,s)) return;
+    double bd=-1.0, bx=0, by=0;
+    for (int i=0;i<c->rp_n[s];++i) {
+        if (!cor_eligible(c->rp_x[s][i],c->rp_y[s][i])) continue;
+        double nx, ny;
+        const double d=cor_nearest(c->rp_x[s][i],c->rp_y[s][i],dz,x,y,&nx,&ny);
+        if (d==0.0) { *ox=*oy=0; return; }
+        if (bd<0.0 || d<bd) { bd=d; bx=nx; by=ny; }
+    }
+    /* both outputs in floating point: rounding either would add +-1 noise that the division below amplifies
+     * and that could break monotonicity */
+    double ex, ey, vx, vy;
+    pipeline_d(c,s,bx,by,dz,&ex,&ey);
+    pipeline_d(c,s,x,y,dz,&vx,&vy);
+    double sc=1.0-hypot_i(ex,ey)/32767.0;
+    if (sc<0.1) sc=0.1;
+    vx=(vx-ex)/sc; vy=(vy-ey)/sc;
+    *ox=(int16_t)(vx<-32768.0 ? -32768 : vx>32767.0 ? 32767 : SDL_lround(vx));
+    *oy=(int16_t)(vy<-32768.0 ? -32768 : vy>32767.0 ? 32767 : SDL_lround(vy));
+}
 /* Continuous: a stick whose raw value stays outside its deadzone and within CAL_STUCK_SPREAD on both axes
  * for CAL_STUCK_US is stuck; the mean becomes its centre. A hand holding a stick deflected jitters more and
  * usually moves within 3 s; the rare false capture is undone by F9 / the chord or by the auto-release. */
@@ -291,7 +397,10 @@ static void cal_stuck(PadCal *c, const int raw[4], const int dz[2], uint64_t now
         if (SDL_fabs(mx-c->cx[s])<=CAL_SAME_CENTRE && SDL_fabs(my-c->cy[s])<=CAL_SAME_CENTRE) continue; /* already centred */
         const int r=cal_capture(c,s,mx,my,dz[s]);
         if (r<0) c->refused[s]=1;
-        else if (r>0) { cal_log(c," (auto, stuck 3 s)"); rest_learn(c,s,c->cx[s],c->cy[s]); }
+        else if (r>0) {
+            cal_log(c," (auto, stuck 3 s)"); rest_learn(c,s,c->cx[s],c->cy[s]);
+            if (cor_enabled(c) && cor_eligible(c->cx[s],c->cy[s])) cor_log(s,c->cx[s],c->cy[s],dz[s]);
+        }
     }
 }
 /* Fast settle: raw still for REST_STILL_US and within REST_RADIUS of a known rest point -> the centre snaps to
@@ -325,6 +434,8 @@ static void cal_snap(PadCal *c, const int raw[4], const int dz[2], uint64_t now)
         int tx=mx, ty=my;
         if (best<0 || hypot_i(mx,my)<=(double)dz[s]) tx=ty=0;
         if (hypot_i(tx,ty)>CAL_LIMIT*32767.0) continue;
+        /* a stick held still beyond the corridor is a deliberate look, not a rest: do not zero it by snapping */
+        if (best>=0 && cor_any(c,s) && !cor_inside(c,s,dz[s],mx,my)) continue;
         if (SDL_abs(tx-c->cx[s])<=CAL_SAME_CENTRE && SDL_abs(ty-c->cy[s])<=CAL_SAME_CENTRE) continue;
         c->cx[s]=tx; c->cy[s]=ty; c->rest_since[s]=0;
         if (getenv("BB_PAD_LOG") && getenv("BB_PAD_LOG")[0]=='1')
@@ -408,6 +519,9 @@ static SDL_Gamepad *current_gamepad(void) {
                 SDL_GUIDToString(SDL_GetJoystickGUID(SDL_GetGamepadJoystick(gamepad)),cal.key+strlen(cal.key),
                                  (int)(sizeof cal.key-strlen(cal.key)));
                 rest_load(&cal);
+                { const int dz_log[2]={stick_deadzone_setting("BB_STICK_DEADZONE_LEFT",STICK_DEADZONE_LEFT),
+                                       stick_deadzone_setting("BB_STICK_DEADZONE_RIGHT",STICK_DEADZONE_RIGHT)};
+                  cor_log_all(&cal,dz_log); }
                 printf("Runtime: gamepad connected: %s\n",SDL_GetGamepadName(gamepad));
                 log_gamepad_backend(gamepad);
             }
@@ -1258,10 +1372,8 @@ static void sample_host(PadData *d) {
         if (pad_log) log_pad_buttons(g);
         cal_update(&cal,raw4,dz2,now);
         int16_t clx, cly, crx, cry;
-        stick_calibrate(rlx,rly,cal.cx[0],cal.cy[0],&clx,&cly);
-        stick_calibrate(rrx,rry,cal.cx[1],cal.cy[1],&crx,&cry);
-        stick_deadzone(clx,cly,dz_left,&clx,&cly);
-        stick_deadzone(crx,cry,dz_right,&crx,&cry);
+        stick_output(&cal,0,rlx,rly,dz_left,&clx,&cly);
+        stick_output(&cal,1,rrx,rry,dz_right,&crx,&cry);
         d->left_x=axis(clx); d->left_y=axis(cly); d->right_x=axis(crx); d->right_y=axis(cry);
         if (pad_log) {
             static uint64_t pad_log_us;

@@ -1,6 +1,10 @@
-/* Offline replay of a BB_PAD_LOG=1 log through the stick calibration (src/runtime_pad.c), triage round 8.
+/* Offline replay of a BB_PAD_LOG=1 log through the stick calibration (src/runtime_pad.c), triage rounds 8 and 9.
  *
- *   replay_pad_log <log> [memory 0|1] [settle_ms] [warm 0|1]
+ *   replay_pad_log <log> [memory 0|1] [settle_ms] [warm 0|1] [corridor 0|1]
+ *
+ * corridor 1 (round 9, default 0 = round 8) runs the dead corridor too and prints a SAMPLES line: the number of
+ * logged PAD: samples (value held at the end of its second) at which the corrected right stick was off-centre
+ * while the raw value was at rest (state A or B, settled) or on a centre->stuck slide (A -> mid samples -> B).
  *
  * The log has one "PAD: raw ..." line per second, so each logged raw value is held for one second at 60 Hz;
  * when it differs from the previous one by more than REST_SPREAD, the first settle_ms of that second are a
@@ -45,9 +49,21 @@ static int stable(const Sample *smp, int n, int i) {
     return 0;
 }
 
+/* A sample on a centre->stuck slide: a run of "mid" samples (ry between -19500 and -3000, |rx| < 5000: neither
+ * rest state nor real input far to the side) that starts right after an A sample and ends at a B sample. */
+static int is_mid(const Sample *s) { return s->raw[3]>-19500 && s->raw[3]<-3000 && SDL_abs(s->raw[2])<5000; }
+static int on_slide(const Sample *smp, int n, int i) {
+    if (!is_mid(&smp[i])) return 0;
+    int a=i, b=i;
+    while (a>0 && is_mid(&smp[a])) --a;
+    while (b<n-1 && is_mid(&smp[b])) ++b;
+    return cls(&smp[a])=='A' && cls(&smp[b])=='B' && !is_mid(&smp[a]) && !is_mid(&smp[b]);
+}
+
 int main(int argc, char **argv) {
-    if (argc<2) { fprintf(stderr,"usage: %s <log> [memory 0|1] [settle_ms] [warm 0|1]\n",argv[0]); return 2; }
-    const int memory=argc>2 ? atoi(argv[2]) : 1, settle_ms=argc>3 ? atoi(argv[3]) : 0, warm=argc>4 ? atoi(argv[4]) : 0;
+    if (argc<2) { fprintf(stderr,"usage: %s <log> [memory 0|1] [settle_ms] [warm 0|1] [corridor 0|1]\n",argv[0]); return 2; }
+    const int memory=argc>2 ? atoi(argv[2]) : 1, settle_ms=argc>3 ? atoi(argv[3]) : 0, warm=argc>4 ? atoi(argv[4]) : 0,
+              corridor=argc>5 ? atoi(argv[5]) : 0;
     setenv("BB_STICK_REST_MEMORY",memory ? "1" : "0",1);
     unsetenv("BB_PAD_LOG");
     FILE *f=fopen(argv[1],"r");
@@ -66,14 +82,15 @@ int main(int argc, char **argv) {
     fclose(f);
     const int dz2[2]={STICK_DEADZONE_LEFT,STICK_DEADZONE_RIGHT};
     PadCal c;
-    cal_connect(&c,0); c.auto_state=1;
+    cal_connect(&c,0); c.auto_state=1; c.corr=corridor;
     const int runs=warm ? 2 : 1;
     double t_a=0, t_b=0, off_a=0, off_b=0, all_off=0, all_t=0; int centre_match=0, centre_cmp=0, captures=0, releases=0;
+    int smp_rest=0, smp_rest_off=0, smp_slide=0, smp_slide_off=0, smp_all_off=0;
     int ep_open=0; double ep_len=0, ep_sum[5]={0}; int ep_n[5]={0}; /* episodes: <0.5 s, <1.5 s, <3.5 s, <10 s, longer */
     for (int run=0; run<runs; ++run) {
         const int measure=run==runs-1;
         PadCal keep=c;
-        cal_connect(&c,0); c.auto_state=1;           /* a new session: centre back to (0,0) ... */
+        cal_connect(&c,0); c.auto_state=1; c.corr=corridor;           /* a new session: centre back to (0,0) ... */
         if (run>0) { memcpy(c.rp_n,keep.rp_n,sizeof c.rp_n); memcpy(c.rp_x,keep.rp_x,sizeof c.rp_x);
                      memcpy(c.rp_y,keep.rp_y,sizeof c.rp_y); memcpy(c.rp_seq,keep.rp_seq,sizeof c.rp_seq); c.seq=keep.seq; }
         uint64_t t=1000000;
@@ -94,16 +111,22 @@ int main(int argc, char **argv) {
                     if (SDL_abs(c.cx[1]-s->cx)<=300 && SDL_abs(c.cy[1]-s->cy)<=300) ++centre_match;
                 }
                 const int k_class=cls(s), st=stable(smp,n,i);
+                if (measure && k==steps-1) {                 /* the logged value, as the game would have had it */
+                    int16_t sx, sy;
+                    stick_output(&c,1,(int16_t)raw[2],(int16_t)raw[3],STICK_DEADZONE_RIGHT,&sx,&sy);
+                    const int off=axis(sx)!=128 || axis(sy)!=128;
+                    smp_all_off+=off;
+                    if (on_slide(smp,n,i)) { ++smp_slide; smp_slide_off+=off; }
+                    else if (k_class!='M' && st) { ++smp_rest; smp_rest_off+=off; }
+                }
                 if (measure && k_class!='M') {
                     int16_t qx, qy;
-                    stick_calibrate((int16_t)raw[2],(int16_t)raw[3],c.cx[1],c.cy[1],&qx,&qy);
-                    stick_deadzone(qx,qy,STICK_DEADZONE_RIGHT,&qx,&qy);
+                    stick_output(&c,1,(int16_t)raw[2],(int16_t)raw[3],STICK_DEADZONE_RIGHT,&qx,&qy);
                     all_t+=1.0/60; all_off+=(axis(qx)!=128 || axis(qy)!=128)/60.0;
                 }
                 if (measure && k_class!='M' && st) {
                     int16_t ox, oy;
-                    stick_calibrate((int16_t)raw[2],(int16_t)raw[3],c.cx[1],c.cy[1],&ox,&oy);
-                    stick_deadzone(ox,oy,STICK_DEADZONE_RIGHT,&ox,&oy);
+                    stick_output(&c,1,(int16_t)raw[2],(int16_t)raw[3],STICK_DEADZONE_RIGHT,&ox,&oy);
                     const int off=axis(ox)!=128 || axis(oy)!=128;
                     if (off) { ep_open=1; ep_len+=1.0/60; }
                     if (!off && ep_open) { const int b=ep_len<0.5?0:ep_len<1.5?1:ep_len<3.5?2:ep_len<10?3:4; ++ep_n[b]; ep_sum[b]+=ep_len; ep_open=0; ep_len=0; }
@@ -116,6 +139,10 @@ int main(int argc, char **argv) {
             "| total off-centre in rest %.1f s | centre match vs log %d/%d%s\n",
             memory,settle_ms,warm,n,t_a,off_a,t_b,off_b,off_a+off_b,centre_match,centre_cmp,
             memory ? "" : " (round-5 logic)");
+    fprintf(stderr,"  SAMPLES corridor=%d: at rest %d (off-centre %d) | on an A->B slide %d (off-centre %d) | together %d samples, "
+            "off-centre %d (%.1f%%) | all %d samples, off-centre %d\n",corridor,smp_rest,smp_rest_off,smp_slide,smp_slide_off,
+            smp_rest+smp_slide,smp_rest_off+smp_slide_off,
+            smp_rest+smp_slide ? 100.0*(smp_rest_off+smp_slide_off)/(smp_rest+smp_slide) : 0.0,n,smp_all_off);
     fprintf(stderr,"  any second in a rest band (incl. real input sweeping through): %.0f s, off-centre %.1f s\n",all_t,all_off);
     fprintf(stderr,"  off-centre episodes (count/seconds): <0.5s %d/%.0f  <1.5s %d/%.0f  <3.5s %d/%.0f  <10s %d/%.0f  longer %d/%.0f\n",
             ep_n[0],ep_sum[0],ep_n[1],ep_sum[1],ep_n[2],ep_sum[2],ep_n[3],ep_sum[3],ep_n[4],ep_sum[4]);

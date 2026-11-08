@@ -139,6 +139,16 @@ about a quarter of a second each time, and `grep 'snapped to rest point' user/la
 (F9 or the chord re-centres, deleting `user/pad_rest_points.txt` forgets everything). Copy the log:
 `cp user/last_run.log ~/Desktop/m5-round8.log` and `cp user/pad_rest_points.txt ~/Desktop/`.
 
+**Round 9 check (dead corridor):** `BB_PAD_LOG=1 ./run.sh` (plus the usual variables; keep `user/pad_rest_points.txt`, it
+holds your learned point). 1) At launch the log must have `Runtime: stick rest points loaded: left 0 right 1` and
+`Runtime: stick corridor right: (0,0)→(1143,-20709), half-width 8689, up-look starts at 68% travel` (numbers follow your
+file). 2) In the game, push the right stick hard (any direction) and let go; watch the camera while the stick slides back
+and settles: it should **not** creep up any more, not during the slide and not at rest. 3) Looking up now needs the stick
+well beyond where it rests (about 68 % of the way, a bit more); look up and down, left and right normally, and check
+that the camera responds smoothly with no jump when you leave the dead zone. 4) Comparison: `BB_STICK_CORRIDOR=0 ./run.sh`
+is round 8 again. 5) Copy the log: `cp user/last_run.log ~/Desktop/m5-round9.log`, and tell me whether up-looks feel too
+dead or the camera still moves by itself.
+
 
 ## Input while another app is in front (triage round 6)
 - The **controller keeps working while another app is frontmost** (Unity Editor, Terminal, Finder): the port sets

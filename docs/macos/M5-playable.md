@@ -474,3 +474,42 @@ At 0 ms the 75 s left are 228 episodes of about a quarter second: the 250 ms flo
   upward samples in run 2 are on that slide.
 - **Owner decision: dead corridor** — treat the path between true centre and a learned stuck point as centre;
   looking up starts only beyond the stuck point (gentle up-looks are lost on this controller). Triage round 9.
+
+### Triage round 9: dead corridor (agent, 2026-11-08)
+
+**Why.** Owner check of round 8: after a release the faulty right stick slides from the centre to its stuck point over 2-4 s (e.g. ry -8984 -> -16690 -> -19666). A sliding stick is never still, so the round-8 snap cannot act on the way, and the camera creeps up for the whole slide. Owner decision: a dead corridor; up-looks start only beyond the stuck point.
+
+**Parameters, derived from the logs** (`user/m5-round8-check-1.log`, `-2.log`, learned point P = (1143,-20709)). Clean centre->stuck slides = a run of samples after a centre sample (|rx|,|ry| < 3000) with ry in (-19500,-3000), |rx| < 5000, ending at a rest sample (ry -23000..-17000): 29 slides, 131 samples (the end sample included).
+- Largest distance from the line (0,0)->P along those slides: **2906** (at (-1773,-20535)); the largest x deviation is 2906 as well, perpendicular 2902. The stuck points themselves spread x -1773..3948 around P.x = 1143.
+- **W = max(deadzone 8689, 1.5 x 2906 = 4359) = 8689.** The deadzone decides on this controller. `COR_SLIDE_DEV` = 2906 is a constant in `runtime_pad.c`; the measurement is 1.5 x that, so another controller with a narrower deadzone would use the measured value.
+- **E = 1500** past P (the brief's value). Ends are flat, not round: a round cap of radius W would end the corridor at 94 % of the range.
+- Up-look starts at (|P| + E) / 32767 = (20740 + 1500) / 32767 = **68 %** of travel, when the snapped centre is (0,0). With the centre snapped to P the round-8 scaled deadzone around P is the larger one, so the up-look starts about P + 3200, i.e. ~73 %. Log at connect: `Runtime: stick corridor right: (0,0)->(1143,-20709), half-width 8689, up-look starts at 68% travel` (the arrow is U+2192 in the log); also printed when a new point is learned.
+
+**Change** (`src/runtime_pad.c`; shared file, but the default is off outside `__APPLE__` and needs the rest memory).
+- For each learned point P of a stick with 30 % <= |P| <= 85 % of 32767 a corridor: the rectangle `t in [0, |P|+E]`, `|lateral| <= W` along the direction (0,0)->P.
+- `stick_output()` replaces the calibrate + deadzone pair in the read path. A raw value inside any corridor -> exactly (0,0) -> bytes 128/128, **whatever the snapped centre is**. Outside every corridor: the round-8 value `o(v)` (centre, calibration, scaled deadzone) is rescaled to `o' = (o(v) - o(n)) / (1 - |o(n)|/32767)`, `n` = the nearest corridor point, `o(n)` the same pipeline there (both in floating point, rounded once at the end). So it is 0 on the corridor edge (no jump, for any snapped centre), and a full deflection still reaches 0/255. Left, right and down at y ~ 0 are what round 8 sent (same bytes).
+- Snapping (round 8) stays. One addition: **a still hold that is beyond every corridor is not snapped to a learned point** (a deliberate up-look held for 250 ms within 3000 of P would otherwise be zeroed by the snap); snaps to the true centre are unaffected.
+- `BB_STICK_CORRIDOR=0` disables corridors and the guard (round 8 exactly). Default on for `__APPLE__`, off elsewhere.
+- Not touched: keyboard/mouse, `follow_push`, triggers. A stick with no learned point (the left one in the owner's file) takes the old path (byte-identical, tested).
+
+**Tests** (`tests/test_pad.c`, `PASS: stick dead corridor ...`): a slide 0 -> P at 16 ms steps, from either snapped centre and also +-2906 off the line, stays (128,128) the whole way (with the snap logic running); also 1400 past P and 8000 sideways at P; full up reaches 0; full down/left/right have the round-8 bytes; up along the corridor (both centres), sideways at mid height and down through the near end are monotonic with steps <= 8..12 units per raw unit (no jump at the edge); no point / a point at 27 % / at 88 % / a left-stick point: bit-identical to round 8 over a 30x30 grid for both centres; `BB_STICK_CORRIDOR=0`: bit-identical, the guard is off; the snap guard (inside snaps, beyond the edge does not). `ROSETTA_ADVERTISE_AVX=1 bash build.sh --test`: exit 0, 19 PASS lines, -Werror on.
+
+**Replay** (`out/replay-pad-log <log> 1 0 <warm> <corridor 0|1>`; the `SAMPLES` line is new). Logged PAD: samples (value held at the end of its second) at which the corrected right stick was off-centre while the raw value was at rest (A or B, settled) or on an A->B slide:
+
+| log | | rest samples off-centre | A->B slide samples off-centre | together |
+|---|---|---|---|---|
+| 1 (469 samples) | round 8 | 45 of 288 | 19 of 25 | 64 of 313 (20.4 %) |
+| 1 | round 9, cold | 3 of 288 | 0 of 25 | 3 of 313 (1.0 %) |
+| 1 | round 9, warm (points known) | 0 of 288 | 0 of 25 | 0 of 313 (0 %) |
+| 2 (611 samples) | round 8 | 33 of 207 | 27 of 77 | 60 of 284 (21.1 %) |
+| 2 | round 9, cold | 3 of 207 | 0 of 77 | 3 of 284 (1.1 %) |
+| 2 | round 9, warm | 0 of 207 | 0 of 77 | 0 of 284 (0 %) |
+
+The 3 + 3 cold samples are the first 3 s of the first stuck episode, before the point is learned. Caveat: the logs hold one value per second, so the replay sees a slide as a few steps; the real 60 Hz path is covered by the unit test. Samples off-centre in the whole log (real input included) fall from 153 to 56 (log 1) and from 236 to 101-104 (log 2).
+
+**Costs and risks (owner to judge).**
+1. Gentle up-looks are lost, as decided: nothing until 68 % of travel (73 % when the centre is snapped to P). The lateral half-width is the deadzone (8689), so near the corridor a sideways push is also dead until it is 8689 from the axis.
+2. Corridors are made for any stick that has a learned point at 30-85 %. The left stick learns a point only after 3 s held still within +-64 outside the deadzone (e.g. a steady 60 % walk), and then it would get a dead corridor from the centre to that value. None is in the owner's file today. Remedy: `BB_STICK_CORRIDOR=0`, or delete the line from `user/pad_rest_points.txt`.
+3. Round-8 false snaps while holding a stick still at a learned point are unchanged inside the corridor.
+
+**Not verified.** On the faulty stick itself (the shell cannot move it): feel of the corridor edge and of the up-look onset. Steps: M5-PLAYTEST.md, "Round 9 check".

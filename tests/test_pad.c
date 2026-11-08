@@ -70,6 +70,11 @@ static uint64_t sweep(PadCal *c, uint64_t t, int x0, int y0, int x1, int y1, int
     return t;
 }
 
+/* The round-8 pipeline (centre, calibration, deadzone), the reference for the corridor tests. */
+static void round8_output(const PadCal *c, int s, int x, int y, int dz, int16_t *ox, int16_t *oy) {
+    stick_calibrate((int16_t)x,(int16_t)y,c->cx[s],c->cy[s],ox,oy);
+    stick_deadzone(*ox,*oy,dz,ox,oy);
+}
 int main(void) {
     char restfile[]="bbport-rest-test-XXXXXX";
     { int rfd=mkstemp(restfile); assert(rfd>=0); close(rfd); unlink(restfile); }
@@ -356,6 +361,123 @@ int main(void) {
               PadCal mm; cal_connect(&mm,0); assert(mm.mem==1);
               /* detection off (BB_STICK_AUTOCENTER=0) also means no memory */
               mm.auto_state=2; assert(!cal_memory_on(&mm)); }
+
+            /* ---- dead corridor (round 9) ---- */
+            {
+                const int dzr=8689, PX=1143, PY=-20709;
+                PadCal q; cal_connect(&q,0); q.auto_state=1; q.corr=1; q.rp_n[1]=1; q.rp_x[1][0]=PX; q.rp_y[1][0]=PY;
+                assert(cor_enabled(&q) && cor_any(&q,1) && !cor_any(&q,0));
+                assert(cor_halfwidth(dzr)==dzr && cor_halfwidth(2000)==1.5*COR_SLIDE_DEV);   /* max(deadzone, 1.5 x slide) */
+                /* a slide 0 -> P sampled every 16 ms stays (128,128) all the way, from either snapped centre, also
+                 * 2906 off the line (the largest in the logs) to both sides, and with the whole logic running */
+                for (int state=0; state<2; ++state) for (int dev=-2906; dev<=2906; dev+=2906) {
+                    PadCal w=q; w.cx[1]=state ? PX : 0; w.cy[1]=state ? PY : 0;
+                    uint64_t u=1000000;
+                    for (int i=0;i<=200;++i,u+=SAMPLE_US) {
+                        const int rx=PX*i/200+dev*(i>=10 && i<200), ry=PY*i/200, raw[4]={0,-1,rx,ry};
+                        cal_update(&w,raw,(const int[2]){7849,dzr},u);
+                        int16_t ox, oy; stick_output(&w,1,(int16_t)rx,(int16_t)ry,dzr,&ox,&oy);
+                        assert(axis(ox)==128 && axis(oy)==128);
+                    }
+                }
+                /* and 1500 past P (the extension) and at P with x +- the half-width */
+                { int16_t ox, oy;
+                  stick_output(&q,1,(int16_t)PX,(int16_t)(PY-1400),dzr,&ox,&oy); assert(axis(ox)==128 && axis(oy)==128);
+                  stick_output(&q,1,(int16_t)(PX+8000),(int16_t)PY,dzr,&ox,&oy); assert(axis(ox)==128 && axis(oy)==128);
+                  stick_output(&q,1,(int16_t)(PX-8000),(int16_t)PY,dzr,&ox,&oy); assert(axis(ox)==128 && axis(oy)==128); }
+                /* full up beyond P reaches 0; down, left, right are what round 8 sent (centre (0,0)) */
+                { int16_t ox, oy, rx, ry;
+                  stick_output(&q,1,0,-32768,dzr,&ox,&oy); assert(axis(oy)==0);
+                  stick_output(&q,1,PX,-32768,dzr,&ox,&oy); assert(axis(oy)==0);
+                  const int pts[4][2]={{0,32767},{-32768,0},{32767,0},{0,-1}};
+                  for (int i=0;i<4;++i) {
+                      stick_output(&q,1,(int16_t)pts[i][0],(int16_t)pts[i][1],dzr,&ox,&oy);
+                      round8_output(&q,1,pts[i][0],pts[i][1],dzr,&rx,&ry);
+                      assert(axis(ox)==axis(rx) && axis(oy)==axis(ry));
+                  }
+                  stick_output(&q,1,0,32767,dzr,&ox,&oy); assert(axis(oy)==255);
+                  stick_output(&q,1,-32768,0,dzr,&ox,&oy); assert(axis(ox)==0);
+                  stick_output(&q,1,32767,0,dzr,&ox,&oy); assert(axis(ox)==255); }
+                /* monotonic and no jump crossing the corridor edge: up along the corridor (both snapped centres),
+                 * sideways at mid height, and across the near end */
+                for (int state=0; state<2; ++state) {
+                    PadCal w=q; w.cx[1]=state ? PX : 0; w.cy[1]=state ? PY : 0;
+                    int16_t px_=0, py_=0, ox, oy; int first=1, maxjump=0, left_zero=0;
+                    for (int y=-19000; y>=-32768; --y) {
+                        stick_output(&w,1,(int16_t)PX,(int16_t)y,dzr,&ox,&oy);
+                        if (!first) { assert(oy<=py_); const int j=SDL_abs(oy-py_); if (j>maxjump) maxjump=j; }
+                        if (oy==0 && ox==0) left_zero=y;
+                        px_=ox; py_=oy; first=0;
+                    }
+                    assert(maxjump<=8);                                   /* ~3 per raw unit at most */
+                    /* centre (0,0): dead up to the corridor edge (|P|+1500 = 22240 along the axis, y ~ -22210);
+                     * centre P: the round-8 scaled deadzone around P is the larger one (about P + 3200) */
+                    if (state==0) assert(left_zero<=-22150 && left_zero>=-22300);
+                    else assert(left_zero<=-23700 && left_zero>=-24100);
+                    assert(py_<-32000);
+                    first=1; maxjump=0;
+                    for (int x=0; x<=32767; ++x) {
+                        stick_output(&w,1,(int16_t)x,-12000,dzr,&ox,&oy);
+                        if (!first) { assert(ox>=px_); const int j=SDL_abs(ox-px_)+SDL_abs(oy-py_); if (j>maxjump) maxjump=j; }
+                        px_=ox; py_=oy; first=0;
+                    }
+                    assert(maxjump<=12);
+                    first=1; maxjump=0;                                    /* down through the near end, x = 0 */
+                    for (int y=-3000; y<=32767; ++y) {
+                        stick_output(&w,1,0,(int16_t)y,dzr,&ox,&oy);
+                        if (!first) { assert(oy>=py_); const int j=SDL_abs(oy-py_)+SDL_abs(ox-px_); if (j>maxjump) maxjump=j; }
+                        px_=ox; py_=oy; first=0;
+                    }
+                    assert(maxjump<=12);
+                }
+                /* a stick without a learned point, a point too near the centre and one beyond 85 %: byte-identical
+                 * to round 8, for the true centre and a snapped one */
+                for (int variant=0; variant<4; ++variant) {
+                    PadCal w; cal_connect(&w,0); w.auto_state=1; w.corr=1;
+                    if (variant==1) { w.rp_n[1]=1; w.rp_x[1][0]=0; w.rp_y[1][0]=-9000; }        /* 27 %: deadzone covers it */
+                    if (variant==2) { w.rp_n[1]=1; w.rp_x[1][0]=0; w.rp_y[1][0]=-29000; }       /* 88 %: refused */
+                    if (variant==3) { w.rp_n[0]=1; w.rp_x[0][0]=0; w.rp_y[0][0]=-20000; }       /* left point: right unaffected */
+                    for (int state=0; state<2; ++state) {
+                        w.cx[1]=state ? PX : 0; w.cy[1]=state ? PY : 0;
+                        for (int x=-32768; x<=32767; x+=1111) for (int y=-32768; y<=32767; y+=1109) {
+                            int16_t ox, oy, rx, ry;
+                            stick_output(&w,1,(int16_t)x,(int16_t)y,dzr,&ox,&oy);
+                            round8_output(&w,1,x,y,dzr,&rx,&ry);
+                            assert(ox==rx && oy==ry);
+                        }
+                    }
+                }
+                /* BB_STICK_CORRIDOR=0: byte-identical to round 8, with the learned point present */
+                set_env("BB_STICK_CORRIDOR","0");
+                { PadCal w; cal_connect(&w,0); w.auto_state=1; assert(w.corr==0);
+                  w.rp_n[1]=1; w.rp_x[1][0]=PX; w.rp_y[1][0]=PY;
+                  for (int state=0; state<2; ++state) {
+                      w.cx[1]=state ? PX : 0; w.cy[1]=state ? PY : 0;
+                      for (int x=-32768; x<=32767; x+=1111) for (int y=-32768; y<=32767; y+=1109) {
+                          int16_t ox, oy, rx, ry;
+                          stick_output(&w,1,(int16_t)x,(int16_t)y,dzr,&ox,&oy);
+                          round8_output(&w,1,x,y,dzr,&rx,&ry);
+                          assert(ox==rx && oy==ry);
+                      }
+                  }
+                  /* ... and the snap guard is off with it: a still hold beyond the edge snaps as in round 8 */
+                  uint64_t u=feed(&w,1000000,PX,-23000,600,10,NULL,NULL); (void)u;
+                  assert(w.cy[1]!=0); }
+                unsetenv("BB_STICK_CORRIDOR");
+#ifdef __APPLE__
+                { PadCal w; cal_connect(&w,0); assert(w.corr==1); }          /* default on where the rest memory is on */
+#else
+                { PadCal w; cal_connect(&w,0); assert(w.corr==0); }
+#endif
+                /* snapping: held still inside the corridor snaps as before, held still beyond its edge (a deliberate
+                 * look, 2300 past P but within the snap radius) does not */
+                { PadCal w=q; uint64_t u=feed(&w,1000000,PX+50,PY+300,600,10,NULL,NULL);
+                  assert(SDL_abs(w.cy[1]-(PY+300))<=10);
+                  PadCal v=q; u=feed(&v,1000000,PX,-23000,600,10,NULL,NULL); (void)u;
+                  assert(v.cx[1]==0 && v.cy[1]==0);
+                  u=feed(&v,1000000,0,-1,600,10,NULL,NULL); assert(v.cx[1]==0 && v.cy[1]==0); }
+                puts("PASS: stick dead corridor (slide stays centre, full deflection, monotonic, no jump, byte-identical without a point or with BB_STICK_CORRIDOR=0)");
+            }
         }
     }
     /* through the SDL gamepad: untouched stick with a rest offset sends exactly 128 */
