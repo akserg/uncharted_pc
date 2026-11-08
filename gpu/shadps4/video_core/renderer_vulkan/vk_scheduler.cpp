@@ -15,6 +15,7 @@
 #include <functional>
 
 #include "bbport_copy.h"
+#include "bbport_frame_trace.h"
 #include "video_core/renderer_vulkan/vk_gpu_profiler.h"
 #include "video_core/landing_gate.h"
 #include "bbport_toggles.h"
@@ -568,6 +569,7 @@ void Scheduler::SubmitExecution(SubmitInfo& info) {
         }
     }
     ImGui::Core::TextureManager::Submit();
+    BbFrameTrace::Scope submit_trace{BbFrameTrace::Submit};
     auto submit_result = instance.GetGraphicsQueue().submit(submit_info, info.fence);
     if (submit_result == vk::Result::eErrorDeviceLost) {
         std::printf("Device lost during submit\n");

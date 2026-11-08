@@ -19,6 +19,7 @@
 #include "video_core/texture_cache/image.h"
 
 #include <algorithm>
+#include "bbport_frame_trace.h"
 #include <array>
 #include <atomic>
 #include <cctype>
@@ -315,6 +316,7 @@ Frame* Presenter::PrepareLastFrame() {
 
     Frame* frame = last_submit_frame;
 
+    BbFrameTrace::Scope present_trace{BbFrameTrace::Present};
     while (true) {
         vk::Result result = instance.GetDevice().waitForFences(frame->present_done, false,
                                                                std::numeric_limits<u64>::max());
@@ -996,6 +998,7 @@ Frame* Presenter::GetRenderFrame() {
     };
 
     // Wait for the presentation to be finished so all frame resources are free
+    BbFrameTrace::Scope present_trace{BbFrameTrace::Present};
     while (wait() != vk::Result::eSuccess) {
         ASSERT_MSG(result != vk::Result::eErrorDeviceLost,
                    "Device lost during waiting for a frame");

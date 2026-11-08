@@ -13,6 +13,7 @@
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
 #include "video_core/renderer_vulkan/vk_shader_util.h"
+#include "bbport_frame_trace.h"
 
 namespace Vulkan {
 
@@ -420,6 +421,7 @@ GraphicsPipeline::GraphicsPipeline(
         .layout = *pipeline_layout,
     };
 
+    BbFrameTrace::Scope pipe_trace{BbFrameTrace::Pipe};
     auto [pipeline_result, pipe] =
         device.createGraphicsPipelineUnique(pipeline_cache, pipeline_info);
     if (pipeline_result != vk::Result::eSuccess) {

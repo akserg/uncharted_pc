@@ -13,6 +13,7 @@
 
 #include <cstdlib>
 #include "bbport_threads.h"
+#include "bbport_frame_trace.h"
 
 #include <array>
 #include <atomic>
@@ -110,6 +111,7 @@ public:
         const u32 slot = reason < NumReasons ? reason : ReasonRasterizer;
         ++drains_by_reason[slot];
         const u64 start = __rdtsc();
+        BbFrameTrace::Scope trace{BbFrameTrace::Drain};
         for (u32 spins = 0; consumed.load(std::memory_order_acquire) != head; ++spins) {
             if (spins < 4096) {
                 __builtin_ia32_pause();
@@ -156,6 +158,10 @@ private:
         }
     }
 
+    void Consumed(u64 position) {
+        consumed.store(position, std::memory_order_release);
+    }
+
     void Run(std::stop_token stop) {
         Common::SetCurrentThreadName("bb:DrawRec");
         on_stage_b = true;
@@ -195,14 +201,17 @@ private:
             const auto* header = reinterpret_cast<const Header*>(ring.get() + at % Capacity);
             if (header->size == 0) {
                 at += Capacity - at % Capacity;
-                consumed.store(at, std::memory_order_release);
+                Consumed(at);
                 continue;
             }
             const u64 start = __rdtsc();
-            handler(context, reinterpret_cast<const u8*>(header + 1), header->payload);
+            {
+                BbFrameTrace::Scope trace{BbFrameTrace::Rec};
+                handler(context, reinterpret_cast<const u8*>(header + 1), header->payload);
+            }
             busy_cycles.fetch_add(__rdtsc() - start, std::memory_order_relaxed);
             at += header->size;
-            consumed.store(at, std::memory_order_release);
+            Consumed(at);
         }
     }
 

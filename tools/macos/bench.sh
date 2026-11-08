@@ -11,11 +11,15 @@
 #                        built earlier keep their binaries (out/variants/<name>)
 #   BENCH_ROUTE          pad recording (default user/bench-route.pad)
 #   BENCH_FRAME_AT       replay second of the reference frame dump (default 60; 0 = none)
-#   BENCH_SAMPLE_AT      replay second at which `sample <pid> 10` runs (default off); the report goes to
+#   BENCH_SAMPLE_AT      replay second at which `sample <pid> ${BENCH_SAMPLE_S:-10}` runs (BENCH_SAMPLE_S: seconds, default 10) (default off); the report goes to
 #                        BENCH_SAMPLE_FILE (default out/bench/<label>-<n>.sample.txt)
 #   BENCH_ALLOW_BUSY=1   run although another bb-probe is running (exploration only: the numbers are not valid)
 # A measured run refuses to start next to another bb-probe (waits, re-checking every 60 s); the Unity Editor state
 # is recorded in the result file. BB_PAD_FILE makes the game ignore the host controller (BB_PAD_HOST unset).
+#   BENCH_TRACE=1        BB_FRAME_TRACE=1: per-frame timing in out/bench/frames-<label>-<n>.txt (see gpu/shim/bbport_frame_trace.h)
+#   BENCH_WARMUP=0       no warm-up. Default: every series starts with one replay that is run but not counted
+#                        (out/bench/<label>-warmup.txt, header "warmup"): a rebuilt binary can invalidate the
+#                        pipeline/shader cache, and a cold-cache run is 2-4 fps slower than a warm one.
 #   any BB_* variable is passed on to the game (settings sweeps).
 # The save data of user/ is restored from a snapshot before every run (taken on the first run), so every run
 # starts from the same checkpoint.
@@ -53,11 +57,18 @@ press() { # press <tokens> : hold 0.3 s, release
     echo "$1" > "$PAD"; sleep 0.3; : > "$PAD"
 }
 
+proc_cpu_s() { ps -o time= -p "$1" 2>/dev/null | awk -F: '{t=0; for (i=1; i<=NF; i++) t=t*60+$i; printf "%.2f", t}'; }   # CPU seconds of a process
 unity_cpu() { ps -axo pcpu,command | awk '/Unity\.app\/Contents\/MacOS\/Unity( |$)/ && !/awk/ {cpu+=$1} END {printf "%.0f", cpu}'; }
 good=0
-while (( good < runs )); do
-    n=1; while [[ -e $OUT/$label-$n.txt || -e $OUT/$label-$n.invalid.txt ]]; do ((n++)); done
-    tag=$OUT/$label-$n
+warm=$(( ${BENCH_WARMUP:-1} != 0 ))
+while (( good < runs || warm )); do
+    is_warm=$warm
+    if (( is_warm )); then
+        n=warmup; tag=$OUT/$label-warmup; rm -rf "$tag".*
+    else
+        n=1; while [[ -e $OUT/$label-$n.txt || -e $OUT/$label-$n.invalid.txt ]]; do ((n++)); done
+        tag=$OUT/$label-$n
+    fi
     PAD=$tag.pad; LOG=$tag.log; FRAMES=$tag.frames; DUMP=$tag.dump
     : > "$PAD"; rm -rf "$DUMP"; mkdir -p "$DUMP"; rm -f "$FRAMES"
     # No measured run next to another game copy: any bb-probe (the owner's included) makes us wait, re-checked every 60 s.
@@ -75,6 +86,7 @@ while (( good < runs )); do
     load_before=$(uptime | sed 's/.*load averages*: //')
     rsync -a --delete "$OUT/save-snapshot/" "$USER_DIR/savedata/"
     echo "== $label run $n: $BIN"
+    [[ ${BENCH_TRACE:-0} == 1 ]] && export BB_FRAME_TRACE=1 BB_FRAME_TRACE_FILE=$OUT/frames-$label-$n.txt
     export BB_PAD_FILE=$PAD BB_PERF_FRAMES=$FRAMES BB_FRAME_DUMP_TRIGGER=$tag.trigger BB_DUMP_DIR=$DUMP
     "$BIN/bb-probe" "$PORT/out/eboot/boot-linked.bin" --content-profile "$PORT/out/eboot/content.bin" \
         --app0 "$GAME" --user "$USER_DIR" --timeout 0 > "$LOG" 2>&1 < /dev/null &
@@ -94,7 +106,7 @@ while (( good < runs )); do
     touch "$tag.trigger"; sleep 3; raw=$(ls "$DUMP"/display_*.raw 2>/dev/null | head -1)
     [[ -n $raw ]] && python3 "$PORT/tools/macos/raw2png.py" "$raw" "$tag-start.png" --half; rm -f "$DUMP"/*.raw
     first=$(lines "$FRAMES")
-    t_replay=$(now)
+    t_replay=$(now); cpu0=$(proc_cpu_s $pid)
     echo replay > "$PAD"
     until grep -aq "pad replay of" "$LOG" 2>/dev/null; do sleep 0.2; done
     grep -a "pad replay of" "$LOG"
@@ -105,12 +117,12 @@ while (( good < runs )); do
         if (( ${BENCH_FRAME_AT:-60} > 0 && framed == 0 && at >= ${BENCH_FRAME_AT:-60} )); then touch "$tag.trigger"; framed=1; fi
         if [[ -n ${BENCH_SAMPLE_AT:-} ]] && (( sampled == 0 && at >= BENCH_SAMPLE_AT )); then
             sampled=1
-            sample $pid 10 -file "${BENCH_SAMPLE_FILE:-$tag.sample.txt}" > "$tag.sample.out" 2>&1
+            sample $pid ${BENCH_SAMPLE_S:-10} -file "${BENCH_SAMPLE_FILE:-$tag.sample.txt}" > "$tag.sample.out" 2>&1
         fi
         if (( at > route_ms / 1000 + 90 )); then echo "replay did not finish"; break; fi
         sleep 0.5
     done
-    last=$(lines "$FRAMES")
+    last=$(lines "$FRAMES"); cpu1=$(proc_cpu_s $pid); t_end=$(now)
     # the reference frame (guest display buffer, 1920x1080)
     raw=$(ls "$DUMP"/display_*.raw 2>/dev/null | head -1)
     if [[ -n $raw ]]; then
@@ -121,17 +133,21 @@ while (( good < runs )); do
     kill -TERM $pid 2>/dev/null; wait $pid 2>/dev/null; wait $monpid 2>/dev/null
     rm -rf "$DUMP" "$tag.trigger"
     {
+        (( is_warm )) && echo "warmup=1 (not counted)"
         echo "label=$label run=$n"
         echo "bin=$BIN"
         echo "date=$(date '+%Y-%m-%d %H:%M:%S')"
         echo "unity=$unity_state (at start; load avg $load_before)"
         pgrep -f bb-probe | wc -l | awk '{print "bb_probe_processes_at_end=" $1}'
         python3 "$PORT/tools/macos/bench_report.py" "$FRAMES" "$LOG" "$first" "$last"
+        python3 -c "print('process_cpu_pct=%.0f' % (100*($cpu1-$cpu0)/($t_end-$t_replay)))" 2>/dev/null
         [[ -f $tag.imgdiff ]] && echo "frame_vs_reference: $(cat "$tag.imgdiff")"
         awk '{if ($1 > u) u = $1; if ($2 > p) p = $2} END {printf "max_unity_cpu_pct=%d max_other_bb_probe=%d\n", u, p}' "$tag.mon"
     } > "$tag.txt"
     read -r max_unity max_other < <(awk '{if ($1 > u) u = $1; if ($2 > p) p = $2} END {print u + 0, p + 0}' "$tag.mon")
-    if [[ ${BENCH_ALLOW_BUSY:-0} != 1 ]] && (( max_unity > 100 || max_other > 0 )); then
+    if (( is_warm )); then
+        warm=0; echo "warm-up done (not counted): $(grep -E 'mean_fps|frames_over_20ms' "$tag.txt" | tr '\n' ' ')"
+    elif [[ ${BENCH_ALLOW_BUSY:-0} != 1 ]] && (( max_unity > 100 || max_other > 0 )); then
         mv "$tag.txt" "$tag.invalid.txt"
         echo "run $n INVALID (Unity up to ${max_unity}% CPU, other bb-probe: $max_other): redone"
         (( good == 0 )) && rm -f "$OUT/reference-frame.raw"
