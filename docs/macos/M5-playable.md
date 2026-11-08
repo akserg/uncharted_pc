@@ -465,3 +465,12 @@ At 0 ms the 75 s left are 228 episodes of about a quarter second: the 250 ms flo
 **Tests** (`tests/test_pad.c`): B learned once by the 3 s detection (and saved); sweep to 0 then rest -> centre (0,0) at 250 ms (+ one 16.7 ms sample, not before); settle at (2800,-20900), 1800 from the learned B -> centre = that value, still one point; a new point at (-15000,9000) -> not at 2.85 s, learned at 3 s, later snapped to (-15600,8400) within 250 ms and merged; save -> load in a new `PadCal` -> first settle at (1000,-20200) snaps in 250 ms; a second controller key neither sees nor destroys the first one's lines; a hand-edited point beyond 85 % never snapped; a slow sweep through B (1500/s) and a hold with +-300 jitter never snap; 5th point drops the oldest, a point 1800 away merges; `BB_STICK_REST_MEMORY=0`: captures at 3 s, no fast snap, release after 3 s, no points, no file. `ROSETTA_ADVERTISE_AVX=1 bash build.sh --test`: 18 PASS, exit 0, -Werror on. Tests set `BB_PAD_REST_FILE` to a temporary file, so they never touch `user/pad_rest_points.txt`.
 
 **Not verified.** Nothing on the faulty stick itself (the shell cannot move it); the live behaviour (feel of the snap, false snaps while holding a stick still at a learned point, e.g. 60 % forward held within +-96 for a quarter second) is for the owner's session. Steps: docs/macos/M5-PLAYTEST.md, "Round 8 check".
+
+#### Owner check of round 8 (2026-11-08, logs `user/m5-round8-check-1.log`, `-2.log`)
+- Rest point learned once (`045e:0b13:… 1 1143 -20709`), loaded at the next launch; 46 and 54 snaps per run.
+- **Camera still creeps up.** Cause (reviewer, from the PAD: lines): after release the stick doesn't jump to the
+  stuck point, it **slides upward from centre to ≈ -20,000 over 2–4 s** (e.g. ry -8,984 → -16,690 → -19,666, sent
+  126 → 85 → 69, then the snap). A sliding stick is never "still", so no snap can happen during the slide. 49 of 97
+  upward samples in run 2 are on that slide.
+- **Owner decision: dead corridor** — treat the path between true centre and a learned stuck point as centre;
+  looking up starts only beyond the stuck point (gentle up-looks are lost on this controller). Triage round 9.
