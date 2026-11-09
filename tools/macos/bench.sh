@@ -73,8 +73,8 @@ while (( good < runs || warm )); do
     : > "$PAD"; rm -rf "$DUMP"; mkdir -p "$DUMP"; rm -f "$FRAMES"
     # No measured run next to another game copy: any bb-probe (the owner's included) makes us wait, re-checked every 60 s.
     if [[ ${BENCH_ALLOW_BUSY:-0} != 1 ]]; then
-        while [[ -n $(pgrep -f bb-probe) ]]; do
-            echo "$(date +%H:%M:%S) another bb-probe is running, waiting 60 s:"; pgrep -fl bb-probe | cut -c1-100
+        while [[ -n $(pgrep -x bb-probe) ]]; do
+            echo "$(date +%H:%M:%S) another bb-probe is running, waiting 60 s:"; pgrep -lx bb-probe | cut -c1-100
             sleep 60
         done
     fi
@@ -94,7 +94,7 @@ while (( good < runs || warm )); do
     start=$(now)
     # Contention monitor for the whole run: a busy Unity Editor (> 100% CPU) or a second bb-probe makes it invalid.
     ( while kill -0 $pid 2>/dev/null; do
-          echo "$(unity_cpu) $(pgrep -f 'bb-probe .*boot-linked' | grep -vc "^$pid$")" >> "$tag.mon"; sleep 3
+          echo "$(unity_cpu) $(pgrep -x bb-probe | grep -vc "^$pid$")" >> "$tag.mon"; sleep 3
       done ) &
     monpid=$!
     elapsed() { python3 -c "import time; print(int(time.time()-$start))"; }
@@ -138,7 +138,7 @@ while (( good < runs || warm )); do
         echo "bin=$BIN"
         echo "date=$(date '+%Y-%m-%d %H:%M:%S')"
         echo "unity=$unity_state (at start; load avg $load_before)"
-        pgrep -f bb-probe | wc -l | awk '{print "bb_probe_processes_at_end=" $1}'
+        pgrep -x bb-probe | wc -l | awk '{print "bb_probe_processes_at_end=" $1}'
         python3 "$PORT/tools/macos/bench_report.py" "$FRAMES" "$LOG" "$first" "$last"
         python3 -c "print('process_cpu_pct=%.0f' % (100*($cpu1-$cpu0)/($t_end-$t_replay)))" 2>/dev/null
         [[ -f $tag.imgdiff ]] && echo "frame_vs_reference: $(cat "$tag.imgdiff")"

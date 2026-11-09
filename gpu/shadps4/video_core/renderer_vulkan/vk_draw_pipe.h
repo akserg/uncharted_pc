@@ -112,13 +112,7 @@ public:
         ++drains_by_reason[slot];
         const u64 start = __rdtsc();
         BbFrameTrace::Scope trace{BbFrameTrace::Drain};
-        for (u32 spins = 0; consumed.load(std::memory_order_acquire) != head; ++spins) {
-            if (spins < 4096) {
-                __builtin_ia32_pause();
-            } else {
-                std::this_thread::yield();
-            }
-        }
+        WaitConsumed(head);
         const u64 waited = __rdtsc() - start;
         drain_cycles += waited;
         cycles_by_reason[slot] += waited;
@@ -153,13 +147,45 @@ private:
     }
 
     void WaitForSpace(u64 at, u64 size) {
-        while (at + size - consumed.load(std::memory_order_acquire) > Capacity) {
-            __builtin_ia32_pause();
+        if (at + size - consumed.load(std::memory_order_acquire) > Capacity) {
+            WaitConsumed(at + size - Capacity);
         }
     }
 
+    /// Stage A: returns once stage B has consumed everything before `target`. A spin first
+    /// (65536 pauses: most waits end within it, and a wake-up costs more than a short wait; 4096
+    /// lost 0.7 fps and doubled the hitch rate on the M4 Max, 65536 matched the pure spin while
+    /// halving this thread's CPU; BB_DRAIN_SPIN overrides), then a blocking wait: a stage A that has to
+    /// wait for a long recording burst no longer burns a core (and the scheduler no longer
+    /// bounces it between cores) while it waits. Stage B wakes it in Consumed().
+    void WaitConsumed(u64 target) {
+        static const u32 spin_limit = [] {
+            const char* env = std::getenv("BB_DRAIN_SPIN");
+            return env ? static_cast<u32>(std::strtoul(env, nullptr, 10)) : 65536u;
+        }();
+        for (u32 spins = 0; spins < spin_limit; ++spins) {
+            if (consumed.load(std::memory_order_acquire) >= target) {
+                return;
+            }
+            __builtin_ia32_pause();
+        }
+        // Announce, then re-check (seq_cst both ways with Consumed()): either this thread sees
+        // the new position or stage B sees the announcement and notifies. atomic::wait returns
+        // at once when the value already differs from `seen`, so a notification cannot be lost.
+        consumer_waiting.fetch_add(1, std::memory_order_seq_cst);
+        for (u64 seen = consumed.load(std::memory_order_seq_cst); seen < target;
+             seen = consumed.load(std::memory_order_seq_cst)) {
+            consumed.wait(seen, std::memory_order_seq_cst);
+        }
+        consumer_waiting.fetch_sub(1, std::memory_order_relaxed);
+    }
+
+    /// Stage B: publishes the new consumed position and wakes a waiting stage A.
     void Consumed(u64 position) {
-        consumed.store(position, std::memory_order_release);
+        consumed.store(position, std::memory_order_seq_cst);
+        if (consumer_waiting.load(std::memory_order_seq_cst) != 0) {
+            consumed.notify_all();
+        }
     }
 
     void Run(std::stop_token stop) {
@@ -223,6 +249,7 @@ private:
     u32 pending_size = 0;
     alignas(64) std::atomic<u64> published{0};
     alignas(64) std::atomic<u64> consumed{0};
+    std::atomic<u32> consumer_waiting{0}; ///< threads blocked in WaitConsumed
     alignas(64) std::atomic<u32> wake{0};
     std::atomic<bool> sleeping{false};
     std::atomic<u32> stage_b_tid{0};
