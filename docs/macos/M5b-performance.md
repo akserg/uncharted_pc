@@ -151,5 +151,7 @@ Not run (skipped by decision): `BB_ARENA_PAGE_BITS`, `MVK_CONFIG_USE_METAL_ARGUM
 - `src/runtime_pad.c`: `setenv("BB_REPLAY_T0_US", ...)` under `#ifdef __APPLE__` only.
 - macOS-only tooling: `tools/macos/bench.sh` (warm-up, process CPU, trace and sample options, `pgrep -x` instead of `pgrep -f`: the old patterns matched the checking shell's own command line and made waits hang), `tools/macos/trace_hitches.py`.
 
+- Reviewer: Linux build of 3d49b2a passes; pad-test needed explicit environment (fixed in de80fe7).
+
 ### Recommendation
 Merge `macos-perf` into `macos`: (1) the blocking wait with the 65536 default (same fps and hitch rate as the old spin within noise, command thread CPU halved, process CPU -15 %), after the reviewer's Linux/Windows check; (2) the harness: warm-up, process CPU, `BB_FRAME_TRACE`, `trace_hitches.py`, `pgrep -x` fix. Nothing from the sweep is worth keeping. The remaining frame-time limit (1.2-1.9 % of frames at 33 ms) is the DrawRec thread plus MoltenVK's synchronous Metal encode in the flip's `vkQueueSubmit`; reaching p99 <= 20 ms for good needs a cheaper encode (fewer encoders per command buffer), not a port-side stall fix. Also corrected from round 1: the "cold cache" explanation of the 55-58 fps series is not supported (the cache was full in every run; rebuilds do not invalidate it); those series were run-to-run noise of this machine, which the warm-up reduces but does not remove.
