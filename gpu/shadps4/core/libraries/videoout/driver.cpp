@@ -18,6 +18,7 @@
 #ifdef __APPLE__
 #include "bbport_perf_log.h"
 #endif
+#include "bbport_frame_trace.h"
 #include "video_core/renderer_vulkan/vk_frame_capture.h"
 #include "common/debug.h"
 #include "common/thread.h"
@@ -308,6 +309,7 @@ void VideoOutDriver::Flip(const Request& req) {
 #ifdef __APPLE__
     BbPerfLog::OnFlip(); // bbport (macOS): BB_PERF_LOG=1, one PERF: line every 5 s
 #endif
+    BbFrameTrace::OnFlip(); // bbport: BB_FRAME_TRACE=1, one line per flip (no-op off macOS)
     // bbport: BB_FRAME_STATS=1 prints flip rate and frame time spread every 5 seconds.
     static const bool frame_stats = EmulatorSettingsImpl::Flag("BB_FRAME_STATS", false);
     if (frame_stats) {

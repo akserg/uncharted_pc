@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <limits>
 #include "bbport_settings.h"
+#include "bbport_frame_trace.h"
 #include "common/assert.h"
 #include "common/logging/log.h"
 #include "core/emulator_settings.h"
@@ -104,6 +105,7 @@ void Swapchain::SetHDR(bool hdr) {
 }
 
 bool Swapchain::AcquireNextImage() {
+    BbFrameTrace::Scope present_trace{BbFrameTrace::Present};
     vk::Device device = instance.GetDevice();
     vk::Result result =
         device.acquireNextImageKHR(swapchain, std::numeric_limits<u64>::max(),
@@ -129,6 +131,7 @@ bool Swapchain::AcquireNextImage() {
 }
 
 bool Swapchain::Present() {
+    BbFrameTrace::Scope present_trace{BbFrameTrace::Present};
     const vk::PresentInfoKHR present_info = {
         .waitSemaphoreCount = 1,
         .pWaitSemaphores = &present_ready[image_index],

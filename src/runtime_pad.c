@@ -1602,6 +1602,9 @@ static void replay_sample(PadData *d) {
             printf("Runtime: pad replay of %zu samples from %s\n",replay_count,path ? path : "(unset)");
         }
         replay_start=now_us();
+#ifdef __APPLE__
+        { char t0[32]; snprintf(t0,sizeof t0,"%llu",(unsigned long long)replay_start); setenv("BB_REPLAY_T0_US",t0,1); } /* BB_FRAME_TRACE: replay time of each frame */
+#endif
         replay_next=0;
     }
     const uint32_t ms=(uint32_t)((now_us()-replay_start)/1000);
