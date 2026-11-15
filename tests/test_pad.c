@@ -75,6 +75,32 @@ static void round8_output(const PadCal *c, int s, int x, int y, int dz, int16_t 
     stick_calibrate((int16_t)x,(int16_t)y,c->cx[s],c->cy[s],ox,oy);
     stick_deadzone(*ox,*oy,dz,ox,oy);
 }
+/* The stick tests never rely on a platform default: every block pins the variables it depends on. */
+static const char *const stick_vars[4]={"BB_STICK_AUTOCENTER","BB_STICK_REST_MEMORY","BB_STICK_CORRIDOR","BB_STICK_FIX"};
+static char *saved_env[4];
+static void unset_env(const char *name) {
+#ifdef _WIN32
+    assert(_putenv_s(name,"")==0);
+#else
+    assert(unsetenv(name)==0);
+#endif
+}
+static void save_stick_env(void) {
+    for (int i=0;i<4;++i) { const char *v=getenv(stick_vars[i]); saved_env[i]=v?strdup(v):NULL; }
+}
+static void restore_stick_env(void) {
+    for (int i=0;i<4;++i) {
+        if (saved_env[i]) set_env(stick_vars[i],saved_env[i]); else unset_env(stick_vars[i]);
+        free(saved_env[i]); saved_env[i]=NULL;
+    }
+}
+/* The baseline the stick blocks were written against: detection, memory and corridor on, the fix on the right stick. */
+static void pin_stick(const char *autocentre, const char *memory, const char *corridor, const char *fix) {
+    set_env("BB_STICK_AUTOCENTER",autocentre); set_env("BB_STICK_REST_MEMORY",memory);
+    set_env("BB_STICK_CORRIDOR",corridor); set_env("BB_STICK_FIX",fix);
+}
+static void pin_stick_baseline(void) { pin_stick("1","1","1","right"); }
+
 int main(void) {
     char restfile[]="bbport-rest-test-XXXXXX";
     { int rfd=mkstemp(restfile); assert(rfd>=0); close(rfd); unlink(restfile); }
@@ -174,6 +200,19 @@ int main(void) {
         int16_t a,b,c,e; stick_deadzone((int16_t)v,0,dz,&a,&b); stick_deadzone((int16_t)(v+1<32768?v+1:v),0,dz,&c,&e);
         assert(c>=a && b==0 && e==0);
     }
+    save_stick_env();
+    /* the per-platform defaults, with none of the variables set (the only check that reads them) */
+    for (int i=0;i<4;++i) unset_env(stick_vars[i]);
+    {
+        PadCal d; cal_connect(&d,0);
+#ifdef __APPLE__
+        assert(d.fix==2 && d.auto_state==1 && d.corr==1 && d.mem==1);       /* fix=right, autocentre on, corridor on */
+#else
+        assert(d.fix==3 && d.auto_state==2 && d.corr==0 && d.mem==1);       /* fix=both, autocentre off, corridor off */
+#endif
+    }
+    puts("PASS: stick defaults of this platform (fix, autocentre, corridor)");
+    pin_stick_baseline();
     /* rest-centre calibration */
     {
         /* centre (0,0) is the identity: byte-identical to round 2 */
@@ -221,6 +260,8 @@ int main(void) {
         for (int i=0;i<400;++i,t+=16667) { int raw[4]={0,0,0,-29000}; cal_stuck(&c,raw,dz2,t); }
         assert(c.cy[1]==0);
         /* detection off (BB_STICK_AUTOCENTER=0) */
+        set_env("BB_STICK_AUTOCENTER","0"); { PadCal z; cal_connect(&z,t); assert(z.auto_state==2); }
+        set_env("BB_STICK_AUTOCENTER","1");
         c.auto_state=2;
         for (int i=0;i<400;++i,t+=16667) { int raw[4]={0,0,0,-21000}; cal_stuck(&c,raw,dz2,t); }
         assert(c.cy[1]==0);
@@ -230,7 +271,7 @@ int main(void) {
         for (int i=0;i<300;++i,t+=16667) { int raw[4]={12000,3000,0,0}; cal_stuck(&c,raw,dz2,t); }
         assert(c.cx[0]==12000 && c.cy[0]==3000 && c.cx[1]==0 && c.cy[1]==0);
         c.cx[0]=c.cy[0]=0;
-        unsetenv("BB_STICK_FIX");
+        set_env("BB_STICK_FIX","right");
         /* re-centre: -23630 then F9 at -20840 */
         c.cx[1]=0; c.cy[1]=-23630;
         { int raw[4]={0,0,0,-20840}; cal_recentre(&c,raw,dz2,""); }
@@ -359,7 +400,7 @@ int main(void) {
               u=sweep(&h,u,1000,-20500,0,-1,300);
               u=feed(&h,u,0,-1,1000,10,NULL,NULL); assert(h.cy[1]!=0);          /* no fast snap */
               u=feed(&h,u,0,-1,2300,10,NULL,NULL); assert(h.cy[1]==0);          /* released after 3 s of rest */
-              unsetenv("BB_STICK_REST_MEMORY");
+              set_env("BB_STICK_REST_MEMORY","1");
               PadCal mm; cal_connect(&mm,0); assert(mm.mem==1);
               /* detection off (BB_STICK_AUTOCENTER=0) also means no memory */
               mm.auto_state=2; assert(!cal_memory_on(&mm)); }
@@ -465,12 +506,8 @@ int main(void) {
                   /* ... and the snap guard is off with it: a still hold beyond the edge snaps as in round 8 */
                   uint64_t u=feed(&w,1000000,PX,-23000,600,10,NULL,NULL); (void)u;
                   assert(w.cy[1]!=0); }
-                unsetenv("BB_STICK_CORRIDOR");
-#ifdef __APPLE__
-                { PadCal w; cal_connect(&w,0); assert(w.corr==1); }          /* default on where the rest memory is on */
-#else
-                { PadCal w; cal_connect(&w,0); assert(w.corr==0); }
-#endif
+                set_env("BB_STICK_CORRIDOR","1");
+                { PadCal w; cal_connect(&w,0); assert(w.corr==1); }          /* BB_STICK_CORRIDOR=1 */
                 /* snapping: held still inside the corridor snaps as before, held still beyond its edge (a deliberate
                  * look, 2300 past P but within the snap radius) does not */
                 { PadCal w=q; uint64_t u=feed(&w,1000000,PX+50,PY+300,600,10,NULL,NULL);
@@ -521,7 +558,7 @@ int main(void) {
                         unlink(rf2);
                         set_env("BB_PAD_REST_FILE",restfile);
                     }
-                    unsetenv("BB_STICK_FIX");
+                    set_env("BB_STICK_FIX","right");
                     puts("PASS: BB_STICK_FIX (right: left-stick hold untouched, no rest points, line kept in the file; both: old behaviour)");
                 }
             }
@@ -587,5 +624,6 @@ int main(void) {
     unlink(path);
     unlink(config);
     unlink(restfile);
+    restore_stick_env();
     puts("PASS: pad ABI, debug camera chord, left/right clicks, SDL touch, vibration controls, overlay capture");
 }
