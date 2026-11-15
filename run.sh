@@ -32,6 +32,39 @@ if [ "$(uname -s)" = Darwin ]; then
     # macOS: bb-probe is an x86_64 binary under Rosetta 2; without this cpuid hides AVX and bb-probe stops
     # (Rosetta translates the instructions regardless; docs/macos/M2-memory.md).
     export ROSETTA_ADVERTISE_AVX=1
+
+    # The same default as build.sh: the LunarG SDK for macOS. Needed at run time for libvulkan (the loader).
+    export VULKAN_SDK="${VULKAN_SDK:-$HOME/VulkanSDK/1.4.363.0/macOS}"
+    if [ ! -d "$VULKAN_SDK" ]; then
+        echo "ERROR: Vulkan SDK not found at $VULKAN_SDK" >&2
+        echo "Install the LunarG Vulkan SDK 1.4.363.0 for macOS in ~/VulkanSDK, or set VULKAN_SDK to its macOS folder" >&2
+        echo "(e.g. VULKAN_SDK=/path/to/VulkanSDK/<version>/macOS ./run.sh). See docs/MACOS_BUILD.md." >&2
+        exit 1
+    fi
+
+    # The Vulkan loader finds no driver on its own ("ErrorIncompatibleDriver"): the SDK's setup-env.sh points it
+    # at the SDK's ICD folder. Point it at MoltenVK only (the folder also has KosmicKrisp, which is arm64-only
+    # and cannot load into this x86_64 process). VK_ICD_FILENAMES is the name older loaders read. Neither is
+    # set if the caller already chose a driver with either variable.
+    # Not set, because the game does not need them: DYLD_LIBRARY_PATH (bb-probe and libbbgpu carry an rpath to
+    # $VULKAN_SDK/lib from build time), VK_ADD_LAYER_PATH (only for validation layers, which stay off) and PATH.
+    MVK_ICD="$VULKAN_SDK/share/vulkan/icd.d/MoltenVK_icd.json"
+    if [ -z "${VK_DRIVER_FILES:-}" ] && [ -z "${VK_ICD_FILENAMES:-}" ]; then
+        if [ ! -f "$MVK_ICD" ]; then
+            echo "ERROR: MoltenVK driver file not found: $MVK_ICD" >&2
+            echo "The Vulkan SDK at $VULKAN_SDK looks incomplete; reinstall it, or set VK_DRIVER_FILES to a Vulkan driver (.json)." >&2
+            exit 1
+        fi
+        export VK_DRIVER_FILES="$MVK_ICD"
+        export VK_ICD_FILENAMES="$MVK_ICD"
+        ICD_STATE=found
+    else
+        ICD_STATE="set by caller (${VK_DRIVER_FILES:-$VK_ICD_FILENAMES})"
+    fi
+
+    # MoltenVK is GPU 0; KosmicKrisp (arm64-only) is not usable under Rosetta.
+    export BB_GPU_ID="${BB_GPU_ID:-0}"
+    echo "macOS: VULKAN_SDK=$VULKAN_SDK, MoltenVK ICD $ICD_STATE, BB_GPU_ID=$BB_GPU_ID"
 fi
 export PYTHONUTF8=1
 export PYTHONIOENCODING=utf-8
