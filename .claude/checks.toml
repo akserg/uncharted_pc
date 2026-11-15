@@ -1,0 +1,22 @@
+# Checks and commit rules for this repo, read by ~/.claude/mods/mods.py.
+#   /check gate                  the gate; a pass allows commits
+#   /check bench <label> [runs]  a benchmark series (needs an idle machine)
+
+[checks.gate]
+command = "ROSETTA_ADVERTISE_AVX=1 bash build.sh --test"
+
+[checks.bench]
+command = "tools/macos/bench.sh"
+takes_args = true                # <label> [runs] are part of a normal run
+stage = '^== (.*)'
+tail_pass = 25
+timeout = 14400
+# A Unity test run in the Remake makes benchmark numbers invalid.
+blocked_by = ["~/Projects/lcgo-remake"]
+
+[guard]
+commit_requires = "gate"
+gate_ignores = ["*.md"]            # commits that touch only these need no gate run
+commit_prefix = "macos:"
+protected_branches = ["main"]
+never_commit = ["gpu/third_party/fsr-vulkan", "docs/file_tree.md", "user/", "CLAUDE.md"]
