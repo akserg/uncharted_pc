@@ -30,5 +30,40 @@ A zip that a macOS 15.4+ user can unpack and run.
 - Release zip attached to a GitHub release on the fork.
 
 ## Result
-_(fill in: date, commit/tag, package contents, signing approach, clean-machine test notes,
-upstream PR link or decision, open issues)_
+
+### Tasks 1 and 4 (2026-11-15, branch `macos`)
+
+| Task | State |
+|---|---|
+| 1. `run.sh` works from any new terminal | **done**, commit `a104ddc` |
+| 2. Packaging (`package.sh`, dylib bundle) | not started |
+| 3. `.app` bundle, signing | not started |
+| 4. `docs/MACOS_BUILD.md` | **done**, commit in the docs commit that follows `a104ddc` (`git log -- docs/MACOS_BUILD.md`) |
+| 5. Clean-machine test | not started |
+| 6. Rebase onto upstream, PR decision | not started |
+
+**Task 1.** The Darwin block of `run.sh` now defaults `VULKAN_SDK` (as `build.sh`; stops with a message if the folder
+is missing), sets `VK_DRIVER_FILES` and `VK_ICD_FILENAMES` to `$VULKAN_SDK/share/vulkan/icd.d/MoltenVK_icd.json`
+(only when the caller set neither; stops if the file is missing), defaults `BB_GPU_ID=0`, and prints
+`macOS: VULKAN_SDK=..., MoltenVK ICD found, BB_GPU_ID=0`. Not set, because not needed: `DYLD_LIBRARY_PATH`
+(binaries carry an rpath to `$VULKAN_SDK/lib`), `VK_ADD_LAYER_PATH` (validation stays off). The Linux path is unchanged.
+Note: `vk_platform.cpp` only sets `VK_DRIVER_FILES` itself when an ICD json sits next to the executable; run.sh's
+setting takes precedence, so a packaged build (task 2) must not rely on run.sh's SDK default.
+
+Verification (clean environment, `env -i HOME PATH=/usr/bin:/bin:/usr/sbin:/sbin TERM`, `BB_GAME_DIR=.../CUSA02344
+BB_EXE=u1 bash run.sh`). With `BB_TIMEOUT=40` the watchdog fired before the presenter line (GPU init was still
+running, line 39 of `user/last_run.log`: `STOP: watchdog timeout`); with `BB_TIMEOUT=100` (exit 142 = the watchdog ending the run):
+```
+macOS: VULKAN_SDK=/Users/akserg/VulkanSDK/1.4.363.0/macOS, MoltenVK ICD found, BB_GPU_ID=0
+GPU: device 0: Apple M4 Max, driverID Moltenvk, 1.4.2
+GPU: window and Vulkan presenter ready; SDK 0x02508051, 1738 HLE symbols
+Entering original x86-64 code at guest offset 0x350d70
+Runtime: guest thread 'NdJobWorkerThread 0' created (stack=65536, prio=767)
+```
+No `ErrorIncompatibleDriver`. `GetInstanceLayers: Failed to query layer properties: Success` still appears (harmless
+now). Gate: `CHECK PASS gate [1:40]`.
+
+**Task 4.** `docs/MACOS_BUILD.md` written (sections: what this is and requirements, game files, one-time setup, build,
+run, controls, controller stick fix, known limits, troubleshooting). Unverified: the exact names of the SDK
+installer's components (the guide says only what to untick in general terms), and a from-scratch run of the guide on a
+machine without the SDK/deps.
